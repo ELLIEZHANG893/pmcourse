@@ -38,6 +38,30 @@
 
   onAuthStateChanged(auth, async (user) => {
     if (user) {
+      // 邮箱登录的用户：必须验证邮箱才能进入
+      // Google 登录的用户：emailVerified 自动为 true，直接放行
+      if (!user.emailVerified && user.providerData[0]?.providerId === 'password') {
+        // 邮箱未验证：停在注册验证页面，不进入应用
+        window._currentUser = null;
+        _regUser = user; // 保持 _regUser 以便重发邮件
+        // 显示验证界面（若还未显示）
+        const step2 = document.getElementById('reg-step2');
+        const step1 = document.getElementById('reg-step1');
+        if (step2 && step1) {
+          step1.style.display = 'none';
+          step2.style.display = 'block';
+          const emailDisplay = document.getElementById('reg-email-display');
+          if (emailDisplay) emailDisplay.textContent = user.email;
+        }
+        // 确保停在 auth 页
+        const authScreen = document.getElementById('auth-screen');
+        const appScreen = document.getElementById('app-screen');
+        if (authScreen) authScreen.style.display = '';
+        if (appScreen) appScreen.classList.remove('visible');
+        return;
+      }
+
+      // 已验证或 Google 登录：正常进入应用
       window._currentUser = user;
       const ref = doc(db, 'users', user.uid);
       const snap = await getDoc(ref);
