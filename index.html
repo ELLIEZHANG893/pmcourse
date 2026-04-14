@@ -10,7 +10,7 @@
   import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
   import { getAuth, GoogleAuthProvider, signInWithPopup, signInWithEmailAndPassword,
            createUserWithEmailAndPassword, signOut, onAuthStateChanged, updateProfile,
-           sendPasswordResetEmail } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
+           sendPasswordResetEmail, sendEmailVerification } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
   import { getFirestore, doc, setDoc, getDoc, updateDoc, serverTimestamp, collection, addDoc }
     from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
 
@@ -33,7 +33,7 @@
 
   window._fb = { auth, db, gp, GoogleAuthProvider,
     signInWithPopup, signInWithEmailAndPassword, createUserWithEmailAndPassword,
-    signOut, onAuthStateChanged, updateProfile, sendPasswordResetEmail,
+    signOut, onAuthStateChanged, updateProfile, sendPasswordResetEmail, sendEmailVerification,
     doc, setDoc, getDoc, updateDoc, serverTimestamp, collection, addDoc };
 
   onAuthStateChanged(auth, async (user) => {
@@ -589,6 +589,16 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;bac
 }
 .guest-banner-btn:hover { opacity: .85; }
 
+
+/* ── 注册表单校验状态 ── */
+.fi.input-error { border-color: #e23b4a !important; }
+.fi.input-ok { border-color: var(--green) !important; }
+.pw-strength { display: flex; gap: 4px; margin-top: 5px; }
+.pw-bar { flex: 1; height: 3px; border-radius: 9999px; background: var(--s4); transition: background .3s; }
+.pw-bar.weak { background: #e23b4a; }
+.pw-bar.mid  { background: var(--amber); }
+.pw-bar.str  { background: var(--green); }
+
 </style>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 </head>
@@ -663,10 +673,49 @@ function exitGuest() {
       <button class="btn-google" onclick="doGoogle()"><svg viewBox="0 0 18 18"><path fill="#4285F4" d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.717v2.258h2.908c1.702-1.567 2.684-3.874 2.684-6.615z"/><path fill="#34A853" d="M9 18c2.43 0 4.467-.806 5.956-2.184l-2.908-2.258c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332C2.438 15.983 5.482 18 9 18z"/><path fill="#FBBC05" d="M3.964 10.707c-.18-.54-.282-1.117-.282-1.707s.102-1.167.282-1.707V4.961H.957C.347 6.175 0 7.55 0 9s.348 2.825.957 4.039l3.007-2.332z"/><path fill="#EA4335" d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0 5.482 0 2.438 2.017.957 4.961L3.964 7.293C4.672 5.166 6.656 3.58 9 3.58z"/></svg>使用 Google 登录</button>
     </div>
     <div id="form-register" class="auth-form hidden">
-      <div class="fg"><div class="fl">昵称</div><input class="fi" id="r-nm" type="text" placeholder="你的名字"/></div>
-      <div class="fg"><div class="fl">邮箱</div><input class="fi" id="r-em" type="email" placeholder="your@email.com"/></div>
-      <div class="fg"><div class="fl">密码（至少6位）</div><input class="fi" id="r-pw" type="password" placeholder="••••••••"/></div>
-      <button class="btn-full" id="r-btn" onclick="doRegister()">创建账号</button>
+      <!-- Step 1: 填写信息 -->
+      <div id="reg-step1">
+        <div class="fg">
+          <div class="fl">昵称</div>
+          <input class="fi" id="r-nm" type="text" placeholder="你的名字" maxlength="20"/>
+        </div>
+        <div class="fg">
+          <div class="fl">邮箱</div>
+          <input class="fi" id="r-em" type="email" placeholder="your@email.com"
+            oninput="validateEmailInput(this)" onblur="validateEmailInput(this)"/>
+          <div id="r-em-err" style="font-size:11px;color:#e23b4a;margin-top:4px;display:none"></div>
+        </div>
+        <div class="fg">
+          <div class="fl">密码（至少6位）</div>
+          <input class="fi" id="r-pw" type="password" placeholder="••••••••" maxlength="32"
+            oninput="validatePwInput(this)"/>
+          <div id="r-pw-hint" style="font-size:11px;margin-top:4px;color:var(--t4)"></div>
+        </div>
+        <button class="btn-full" id="r-btn" onclick="doRegister()">创建账号</button>
+      </div>
+      <!-- Step 2: 邮箱验证 -->
+      <div id="reg-step2" style="display:none;text-align:center">
+        <div style="font-size:40px;margin-bottom:12px">📧</div>
+        <div style="font-size:16px;font-weight:700;color:var(--t1);margin-bottom:8px">验证邮箱</div>
+        <div style="font-size:13px;color:var(--t3);margin-bottom:20px;line-height:1.6">
+          验证邮件已发送到<br>
+          <strong id="reg-email-display" style="color:var(--t1)"></strong><br>
+          请查收并点击邮件中的链接完成验证
+        </div>
+        <div style="background:var(--s2);border:1px solid var(--bd);border-radius:12px;padding:14px;margin-bottom:16px;text-align:left">
+          <div style="font-size:11px;font-weight:700;color:var(--t4);text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">📌 操作步骤</div>
+          <div style="font-size:12.5px;color:var(--t2);line-height:1.8">
+            1. 打开邮箱，找到来自 Firebase 的邮件<br>
+            2. 点击邮件中的「验证邮箱」链接<br>
+            3. 回到这里点击「我已验证」按钮
+          </div>
+        </div>
+        <button class="btn-full" onclick="checkEmailVerified()" style="margin-bottom:10px">✓ 我已验证，进入学习</button>
+        <button onclick="resendVerification()" style="background:none;border:none;color:var(--t3);font-size:12px;cursor:pointer;padding:6px;font-family:'Inter',sans-serif" id="resend-btn">重新发送验证邮件</button>
+        <div style="margin-top:10px">
+          <a onclick="backToRegForm()" style="font-size:12px;color:var(--t4);cursor:pointer">← 返回修改信息</a>
+        </div>
+      </div>
       <div class="a-div"><div class="a-div-l"></div><div class="a-div-t">或者</div><div class="a-div-l"></div></div>
       <button class="btn-google" onclick="doGoogle()"><svg viewBox="0 0 18 18"><path fill="#4285F4" d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.717v2.258h2.908c1.702-1.567 2.684-3.874 2.684-6.615z"/><path fill="#34A853" d="M9 18c2.43 0 4.467-.806 5.956-2.184l-2.908-2.258c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332C2.438 15.983 5.482 18 9 18z"/><path fill="#FBBC05" d="M3.964 10.707c-.18-.54-.282-1.117-.282-1.707s.102-1.167.282-1.707V4.961H.957C.347 6.175 0 7.55 0 9s.348 2.825.957 4.039l3.007-2.332z"/><path fill="#EA4335" d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0 5.482 0 2.438 2.017.957 4.961L3.964 7.293C4.672 5.166 6.656 3.58 9 3.58z"/></svg>使用 Google 注册</button>
     </div>
@@ -3833,7 +3882,7 @@ function clrMsg() { ['a-err','a-ok'].forEach(id => { const el = document.getElem
 function showErr(m) { const el = document.getElementById('a-err'); if (el) { el.textContent=m; el.classList.add('show'); } }
 function showOk(m) { const el = document.getElementById('a-ok'); if (el) { el.textContent=m; el.classList.add('show'); } }
 function fbErr(code) {
-  return ({'auth/user-not-found':'账号不存在，请先注册','auth/wrong-password':'密码错误，请重试','auth/invalid-email':'邮箱格式不正确','auth/email-already-in-use':'该邮箱已被注册，请直接登录','auth/weak-password':'密码至少需要6位','auth/too-many-requests':'尝试次数过多，请稍后再试','auth/popup-closed-by-user':'弹窗被关闭，请重试','auth/invalid-credential':'邮箱或密码不正确'})[code] || '操作失败，请重试（'+code+'）';
+  return ({'auth/user-not-found':'账号不存在，请先注册','auth/wrong-password':'密码错误，请重试','auth/invalid-email':'邮箱格式不正确','auth/email-already-in-use':'该邮箱已被注册，请直接登录','auth/weak-password':'密码至少需要6位','auth/too-many-requests':'尝试次数过多，请稍后再试','auth/popup-closed-by-user':'弹窗被关闭，请重试','auth/invalid-credential':'邮箱或密码不正确','auth/operation-not-allowed':'邮箱注册未开启，请联系管理员或使用Google登录','auth/email-already-in-use':'该邮箱已注册，请直接登录','auth/network-request-failed':'网络连接失败，请检查网络后重试'})[code] || '操作失败，请重试（'+code+'）';
 }
 async function doLogin() {
   const em = document.getElementById('l-em')?.value.trim();
@@ -3844,20 +3893,161 @@ async function doLogin() {
   try { await window._fb.signInWithEmailAndPassword(window._fb.auth, em, pw); }
   catch(e) { showErr(fbErr(e.code)); btn.disabled=false; btn.textContent='登录'; }
 }
+
+// ── 邮箱格式实时校验 ──
+function validateEmailInput(input) {
+  const val = input.value.trim();
+  const errEl = document.getElementById('r-em-err');
+  const emailReg = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!val) {
+    input.classList.remove('input-ok','input-error');
+    if (errEl) errEl.style.display = 'none';
+    return true;
+  }
+  if (!emailReg.test(val)) {
+    input.classList.add('input-error');
+    input.classList.remove('input-ok');
+    if (errEl) { errEl.textContent = '邮箱格式不正确，请检查@符号和域名'; errEl.style.display = 'block'; }
+    return false;
+  }
+  input.classList.add('input-ok');
+  input.classList.remove('input-error');
+  if (errEl) errEl.style.display = 'none';
+  return true;
+}
+
+// ── 密码强度提示 ──
+function validatePwInput(input) {
+  const val = input.value;
+  const hint = document.getElementById('r-pw-hint');
+  if (!hint) return;
+  if (!val) { hint.innerHTML = ''; return; }
+  const strength = val.length >= 10 && /[A-Z]/.test(val) && /[0-9]/.test(val) ? 3
+                 : val.length >= 8 ? 2
+                 : val.length >= 6 ? 1 : 0;
+  const labels = ['', '弱', '中', '强'];
+  const colors = ['', '#e23b4a', 'var(--amber)', 'var(--green)'];
+  const bars = [1,2,3].map(i =>
+    `<div class="pw-bar ${i<=strength?(strength===1?'weak':strength===2?'mid':'str'):''}"></div>`
+  ).join('');
+  hint.innerHTML = strength > 0
+    ? `<div class="pw-strength">${bars}</div><span style="color:${colors[strength]};font-size:11px">${labels[strength]}强度密码</span>`
+    : '';
+}
+
+// ── 注册主函数 ──
+let _regUser = null; // 暂存注册后的用户对象
+
 async function doRegister() {
   const nm = document.getElementById('r-nm')?.value.trim();
   const em = document.getElementById('r-em')?.value.trim();
   const pw = document.getElementById('r-pw')?.value;
-  if (!nm||!em||!pw) { showErr('请填写所有字段'); return; }
-  if (pw.length<6) { showErr('密码至少需要6位'); return; }
+
+  // 前端校验
+  if (!nm) { showErr('请填写昵称'); return; }
+  if (!em) { showErr('请填写邮箱'); return; }
+  if (!validateEmailInput(document.getElementById('r-em'))) return;
+  if (!pw || pw.length < 6) { showErr('密码至少需要6位'); return; }
+
   const btn = document.getElementById('r-btn');
-  btn.disabled=true; btn.textContent='注册中...'; clrMsg();
+  btn.disabled = true;
+  btn.textContent = '注册中...';
+  clrMsg();
+
   try {
+    // 1. 创建账号
     const cred = await window._fb.createUserWithEmailAndPassword(window._fb.auth, em, pw);
-    await window._fb.updateProfile(cred.user, { displayName: nm });
-    cred.user.displayName = nm;
-  } catch(e) { showErr(fbErr(e.code)); btn.disabled=false; btn.textContent='创建账号'; }
+    _regUser = cred.user;
+
+    // 2. 设置昵称
+    await window._fb.updateProfile(_regUser, { displayName: nm });
+    _regUser.displayName = nm;
+
+    // 3. 发送验证邮件
+    await window._fb.sendEmailVerification(_regUser);
+
+    // 4. 切换到验证步骤界面
+    showVerifyStep(em);
+
+  } catch(e) {
+    let msg = fbErr(e.code);
+    // 特别处理 operation-not-allowed
+    if (e.code === 'auth/operation-not-allowed') {
+      msg = '邮箱注册功能未开启。请前往 Firebase 控制台 → Authentication → Sign-in method → 开启「电子邮件/密码」';
+    }
+    showErr(msg);
+    btn.disabled = false;
+    btn.textContent = '创建账号';
+  }
 }
+
+function showVerifyStep(email) {
+  document.getElementById('reg-step1').style.display = 'none';
+  document.getElementById('reg-step2').style.display = 'block';
+  const display = document.getElementById('reg-email-display');
+  if (display) display.textContent = email;
+}
+
+function backToRegForm() {
+  document.getElementById('reg-step1').style.display = '';
+  document.getElementById('reg-step2').style.display = 'none';
+  document.getElementById('r-btn').disabled = false;
+  document.getElementById('r-btn').textContent = '创建账号';
+}
+
+// 检查邮箱是否已验证
+async function checkEmailVerified() {
+  if (!_regUser) {
+    showErr('会话已过期，请重新注册');
+    backToRegForm();
+    return;
+  }
+  const btn = document.querySelector('#reg-step2 .btn-full');
+  if (btn) { btn.disabled = true; btn.textContent = '验证中...'; }
+
+  try {
+    await _regUser.reload();
+    if (_regUser.emailVerified) {
+      // 验证成功，正常进入应用
+      showOk('✓ 邮箱验证成功！正在进入...');
+      setTimeout(() => {
+        window._currentUser = _regUser;
+        showApp(_regUser);
+      }, 800);
+    } else {
+      if (btn) { btn.disabled = false; btn.textContent = '✓ 我已验证，进入学习'; }
+      showErr('邮箱尚未验证，请先点击邮件中的链接');
+    }
+  } catch(e) {
+    if (btn) { btn.disabled = false; btn.textContent = '✓ 我已验证，进入学习'; }
+    showErr('验证检查失败，请稍后重试');
+  }
+}
+
+// 重新发送验证邮件
+async function resendVerification() {
+  if (!_regUser) return;
+  const btn = document.getElementById('resend-btn');
+  if (btn) { btn.disabled = true; btn.textContent = '发送中...'; }
+  try {
+    await window._fb.sendEmailVerification(_regUser);
+    showOk('✓ 验证邮件已重新发送');
+    // 60秒冷却
+    let count = 60;
+    const timer = setInterval(() => {
+      count--;
+      if (btn) btn.textContent = `重新发送（${count}s）`;
+      if (count <= 0) {
+        clearInterval(timer);
+        if (btn) { btn.disabled = false; btn.textContent = '重新发送验证邮件'; }
+      }
+    }, 1000);
+  } catch(e) {
+    showErr('发送失败：' + fbErr(e.code));
+    if (btn) { btn.disabled = false; btn.textContent = '重新发送验证邮件'; }
+  }
+}
+
 async function doGoogle() {
   try { await window._fb.signInWithPopup(window._fb.auth, window._fb.gp); }
   catch(e) { if (e.code !== 'auth/popup-closed-by-user') showErr(fbErr(e.code)); }
