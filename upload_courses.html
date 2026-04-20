@@ -1,0 +1,1041 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>课程数据上传工具 — 电商PM学院</title>
+<style>
+  body { font-family: 'Inter', sans-serif; background: #0f1113; color: #c8cdd2; padding: 30px; max-width: 700px; margin: 0 auto; }
+  h1 { color: #fff; font-size: 20px; margin-bottom: 6px; }
+  .sub { color: #5a6370; font-size: 13px; margin-bottom: 24px; }
+  .card { background: #1e2226; border: 1px solid rgba(255,255,255,.07); border-radius: 14px; padding: 20px; margin-bottom: 16px; }
+  .card h2 { color: #fff; font-size: 14px; margin: 0 0 12px; }
+  .log { background: #0f1113; border: 1px solid rgba(255,255,255,.07); border-radius: 8px; padding: 14px; font-size: 12px; font-family: monospace; height: 280px; overflow-y: auto; line-height: 1.7; }
+  .log .ok { color: #00a87e; }
+  .log .err { color: #e23b4a; }
+  .log .info { color: #8d969e; }
+  .log .warn { color: #ec7e00; }
+  button { padding: 11px 24px; border-radius: 10px; border: none; background: #fff; color: #000; font-size: 14px; font-weight: 700; cursor: pointer; font-family: inherit; margin-right: 10px; transition: opacity .15s; }
+  button:hover { opacity: .85; }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  button.danger { background: #e23b4a; color: #fff; }
+  .progress { height: 6px; background: rgba(255,255,255,.08); border-radius: 9999px; margin: 12px 0; overflow: hidden; }
+  .progress-bar { height: 100%; background: #00a87e; border-radius: 9999px; transition: width .3s; width: 0%; }
+  .stat { display: flex; gap: 16px; margin-top: 12px; }
+  .stat-item { flex: 1; background: #0f1113; border-radius: 8px; padding: 10px; text-align: center; }
+  .stat-n { font-size: 24px; font-weight: 700; color: #fff; }
+  .stat-l { font-size: 11px; color: #5a6370; margin-top: 2px; }
+</style>
+</head>
+<body>
+
+<h1>📚 课程数据上传工具</h1>
+<p class="sub">将30天课程数据批量上传到 Firebase Firestore，完成后课程内容将从数据库动态加载。</p>
+
+<div class="card">
+  <h2>上传状态</h2>
+  <div class="stat">
+    <div class="stat-item"><div class="stat-n" id="s-total">30</div><div class="stat-l">总天数</div></div>
+    <div class="stat-item"><div class="stat-n" id="s-done" style="color:#00a87e">0</div><div class="stat-l">已上传</div></div>
+    <div class="stat-item"><div class="stat-n" id="s-fail" style="color:#e23b4a">0</div><div class="stat-l">失败</div></div>
+  </div>
+  <div class="progress"><div class="progress-bar" id="prog-bar"></div></div>
+  <button id="btn-start" onclick="startUpload()">🚀 开始上传全部30天</button>
+  <button id="btn-stop" onclick="stopUpload()" disabled>⏹ 停止</button>
+</div>
+
+<div class="card">
+  <h2>上传日志</h2>
+  <div class="log" id="log"></div>
+</div>
+
+<script type="module">
+// ── Firebase SDK ──
+import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
+import { getFirestore, doc, setDoc, getDoc } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
+import { getAuth, signInWithEmailAndPassword, onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
+
+// ── Firebase 配置（与主网站一致）──
+const firebaseConfig = {
+  apiKey: "AIzaSyAyzXv6HcRTck_xwkn89PirI_Yze-9xYAY",
+  authDomain: "pm-course-8f0ff.firebaseapp.com",
+  projectId: "pm-course-8f0ff",
+  storageBucket: "pm-course-8f0ff.firebasestorage.app",
+  messagingSenderId: "521287916902",
+  appId: "1:521287916902:web:05aba767230259321cbca7"
+};
+
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app);
+const auth = getAuth(app);
+
+// ── 日志工具 ──
+function log(msg, type='info') {
+  const el = document.getElementById('log');
+  const line = document.createElement('div');
+  line.className = type;
+  const time = new Date().toLocaleTimeString('zh-CN');
+  line.textContent = `[${time}] ${msg}`;
+  el.appendChild(line);
+  el.scrollTop = el.scrollHeight;
+}
+
+let _stop = false;
+let _done = 0;
+let _fail = 0;
+
+function updateStats() {
+  document.getElementById('s-done').textContent = _done;
+  document.getElementById('s-fail').textContent = _fail;
+  document.getElementById('prog-bar').style.width = ((_done + _fail) / 30 * 100) + '%';
+}
+
+window.stopUpload = function() {
+  _stop = true;
+  log('⏹ 用户停止上传', 'warn');
+  document.getElementById('btn-stop').disabled = true;
+};
+
+window.startUpload = async function() {
+  _stop = false;
+  _done = 0;
+  _fail = 0;
+  updateStats();
+  document.getElementById('btn-start').disabled = true;
+  document.getElementById('btn-stop').disabled = false;
+  document.getElementById('log').innerHTML = '';
+
+  log('🔍 检查登录状态...', 'info');
+
+  const user = auth.currentUser;
+  if (!user) {
+    log('❌ 未登录！请用管理员账号登录后再运行此工具', 'err');
+    log('提示：打开浏览器控制台(F12)，用以下命令登录：', 'warn');
+    log('window._auth.signInWithEmailAndPassword(auth, "你的邮箱", "你的密码")', 'warn');
+    document.getElementById('btn-start').disabled = false;
+    document.getElementById('btn-stop').disabled = true;
+    return;
+  }
+
+  log(`✅ 已登录：${user.email}`, 'ok');
+  log(`📤 开始上传30天课程数据到 Firestore...`, 'info');
+  log('────────────────────────────', 'info');
+
+  // ── 课程数据 ──
+  const DAYS = {
+  d1:{
+    title:'双边市场逻辑',tag:'Day 1 · 第一周',
+    desc:'理解电商平台的商业本质：买家与商家如何互相吸引，飞轮如何从0到高速运转。',
+    theory:`
+<div style="margin-bottom:16px">
+  <div style="font-size:9px;font-weight:800;color:var(--t4);text-transform:uppercase;letter-spacing:.1em;margin-bottom:10px">三大平台横向对比 — 点击切换</div>
+  <div style="display:flex;gap:6px;margin-bottom:14px">
+    <button onclick="plt('d1','tb')" id="d1-plt-tb" class="plt-btn plt-on">🟠 淘宝</button>
+    <button onclick="plt('d1','jd')" id="d1-plt-jd" class="plt-btn">🔴 京东</button>
+    <button onclick="plt('d1','pdd')" id="d1-plt-pdd" class="plt-btn">🟣 拼多多</button>
+  </div>
+  <div id="d1-plt-data">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">
+      <div class="info-card"><div class="ic-l">核心策略</div><div class="ic-v">供给侧优先<br>海量长尾商家</div></div>
+      <div class="info-card"><div class="ic-l">目标用户</div><div class="ic-v">全人群<br>重点一二线女性</div></div>
+      <div class="info-card"><div class="ic-l">商家模式</div><div class="ic-v">轻资产撮合<br>第三方商家</div></div>
+      <div class="info-card"><div class="ic-l">变现方式</div><div class="ic-v">广告（直通车）<br>+ 佣金</div></div>
+    </div>
+    <div class="info-card" style="margin-bottom:10px">
+      <div class="ic-l">淘宝增长飞轮</div>
+      <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:8px">
+        <span class="flow-node">免费开店</span><span class="flow-arrow">→</span>
+        <span class="flow-node">海量商家</span><span class="flow-arrow">→</span>
+        <span class="flow-node">SKU极丰富</span><span class="flow-arrow">→</span>
+        <span class="flow-node">买家涌入</span><span class="flow-arrow">→</span>
+        <span class="flow-node">流量变广告费</span><span class="flow-arrow">→</span>
+        <span class="flow-node">更多商家付费</span>
+      </div>
+    </div>
+    <div style="margin-bottom:10px">
+      <div style="font-size:9px;font-weight:700;color:var(--t4);text-transform:uppercase;letter-spacing:.1em;margin-bottom:8px">核心能力维度</div>
+      <div class="score-bar-wrap"><div class="score-bar-lbl">供给丰富度</div><div class="score-bar-track"><div class="score-bar-fill" style="width:95%;background:var(--green)"></div></div></div>
+      <div class="score-bar-wrap"><div class="score-bar-lbl">品质保障</div><div class="score-bar-track"><div class="score-bar-fill" style="width:55%;background:var(--amber)"></div></div></div>
+      <div class="score-bar-wrap"><div class="score-bar-lbl">价格竞争力</div><div class="score-bar-track"><div class="score-bar-fill" style="width:80%;background:var(--green)"></div></div></div>
+      <div class="score-bar-wrap"><div class="score-bar-lbl">用户信任</div><div class="score-bar-track"><div class="score-bar-fill" style="width:68%;background:var(--amber)"></div></div></div>
+    </div>
+    <div class="pm-insight"><div class="pmi-label">PM洞察</div><div class="pmi-text">淘宝的核心产品问题：供给太丰富导致"选择困难"——搜索和推荐算法因此成为最核心的产品能力。双11、直播等本质上都是在解决"海量供给下如何帮用户做决策"这个问题。</div></div>
+  </div>
+</div>
+<div class="kp"><div class="kp-h">双边市场三大核心机制</div>
+<div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>跨边网络效应：</strong>一边用户增加，另一边价值也提升。买家多→商家愿来；商家多→买家愿来。正向循环是平台护城河的核心，也是新进入者最难打破的壁垒。</div></div>
+<div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>冷启动困境：</strong>必须同时破两侧。淘宝：免费开店（破商家侧）+ 支付宝担保（破买家信任）。两侧任一缺失，平台都无法启动。</div></div>
+<div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>飞轮反转风险：</strong>假货→买家信任下降→买家流失→商家流量降→广告ROI降→商家减投。这是平台最危险的负向循环，一旦启动极难逆转。</div></div>
+</div>`,
+    flashcards:[
+      {q:'淘宝、京东、拼多多分别用什么策略解决冷启动？',a:'淘宝：双侧同时破——免费开店+支付宝担保。京东：绕开冷启动——自营直接保证品质。拼多多：先破买家侧——微信裂变+工厂直供极致低价。'},
+      {q:'跨边网络效应为什么是平台护城河的核心？',a:'一边用户增加，另一边价值也提升，形成正向循环越大越强。新进入者难以打破——要吸引商家必须先有买家，但没有商家就没有买家，陷入先有鸡还是先有蛋的困境。'},
+      {q:'平台飞轮反转的风险是什么？以淘宝假货为例。',a:'飞轮反转：正向循环变成负向螺旋。假货增多→买家信任下降→买家流失→商家流量降→广告ROI降→商家减少投入→平台收入减少→更少资源治理假货→假货更多。'},
+      {q:'双边平台收费应该向哪一边收？为什么？',a:'向价格不敏感、获益更大的一侧收费，通常向商家收：专业经营者、对平台流量有强需求、切换成本高。买家免费才能吸引足够多流量。'},
+    ],
+    quiz:[
+      {q:'拼多多早期成功获客的核心策略是？',opts:['A. 大规模电视广告投放','B. 利用微信社交关系链进行拼团裂变','C. 用低价补贴直接购买流量','D. SEO搜索流量优化'],ans:'B',expl:'拼多多把微信社交关系链变成传播渠道——拼团需要拉朋友，拉朋友本身就是免费获客，在巨头夹击中找到低成本突破口。'},
+      {q:'飞轮中为什么必须加入变现环节？',opts:['A. 投资人要求盈利','B. 没有收入就无法持续优化体验，飞轮会停转','C. 平台需要缴税','D. 阻止竞争对手进入'],ans:'B',expl:'没有变现环节的飞轮是「慈善」。收入→更好产品→更多用户→更多收入，这个闭环必须成立，否则资金耗尽飞轮停转。'},
+    ],
+    practice:{
+      context:'你是淘宝的PM，最近一季度GMV增速明显放缓。老板要求你做诊断报告，找出根本原因并提出改进方案。数据显示：DAU平稳，买家平均访问时长下降12%，商家数量稳定，但头部品牌商家广告投放预算下降了18%。',
+      questions:['问题1：根据双边市场理论，GMV增速放缓的根本原因最可能是什么？请从买家侧和商家侧两个维度各给出1-2个假设。','问题2：为什么头部品牌商家广告投放预算下降18%是危险信号？请用飞轮逻辑推导可能的负向循环。','问题3：如果只能做一件事来快速提振GMV，你会优先做什么？请说明决策逻辑和预期效果。']
+    }
+  },
+  d2:{
+    title:'GMV驱动模型',tag:'Day 2 · 第一周',
+    desc:'GMV = 流量 × 转化率 × 客单价 × 复购率，四个杠杆的产品设计逻辑与ROI对比。',
+    theory:`
+<div class="info-card" style="margin-bottom:12px">
+  <div class="ic-l">GMV公式拆解</div>
+  <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:8px">
+    <span class="flow-node" style="background:var(--blue-d);border-color:var(--blb);color:#8085f5">流量</span>
+    <span class="flow-arrow">×</span>
+    <span class="flow-node" style="background:var(--gd);border-color:var(--gb);color:var(--green)">转化率</span>
+    <span class="flow-arrow">×</span>
+    <span class="flow-node" style="background:var(--ad);border-color:rgba(236,126,0,.3);color:var(--amber)">客单价</span>
+    <span class="flow-arrow">×</span>
+    <span class="flow-node" style="background:var(--rd);border-color:rgba(226,59,74,.3);color:var(--red)">复购率</span>
+    <span class="flow-arrow">=</span>
+    <span class="flow-node" style="background:var(--t1);color:var(--s1)">GMV</span>
+  </div>
+</div>
+<div style="margin-bottom:12px">
+  <div style="font-size:9px;font-weight:700;color:var(--t4);text-transform:uppercase;letter-spacing:.1em;margin-bottom:8px">四杠杆 ROI 对比</div>
+  <div class="score-bar-wrap"><div class="score-bar-lbl">买流量</div><div class="score-bar-track"><div class="score-bar-fill" style="width:20%;background:var(--red)"></div></div><span class="score-tag tag-r">ROI 1x</span></div>
+  <div class="score-bar-wrap"><div class="score-bar-lbl">提升转化率</div><div class="score-bar-track"><div class="score-bar-fill" style="width:55%;background:var(--amber)"></div></div><span class="score-tag tag-a">ROI 2.5x</span></div>
+  <div class="score-bar-wrap"><div class="score-bar-lbl">提升客单价</div><div class="score-bar-track"><div class="score-bar-fill" style="width:45%;background:var(--blue)"></div></div><span class="score-tag" style="background:var(--bld);color:#8085f5;border-color:var(--blb)">ROI 2x</span></div>
+  <div class="score-bar-wrap"><div class="score-bar-lbl">提升复购率</div><div class="score-bar-track"><div class="score-bar-fill" style="width:95%;background:var(--green)"></div></div><span class="score-tag tag-g">ROI 6x</span></div>
+</div>
+<div class="pm-insight"><div class="pmi-label">为什么复购ROI最高</div><div class="pmi-text">获客成本已付，边际成本≈0。复购用户带口碑，还能降低下一个用户的获客成本。会员积分系统、专属优惠、个性化推荐——这些都是提升复购率最有效的产品手段。</div></div>
+<div class="kp" style="margin-top:12px"><div class="kp-h">PM必须警惕的数据陷阱</div>
+<div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>DAU增长≠GMV增长：</strong>要看有效访客（有购买意图）而非总UV。1000个薅羊毛用户不如100个有真实购买意图的用户。</div></div>
+<div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>客单价↑≠收入↑：</strong>提价可能同步压低转化率，需要计算整体GMV影响，不能只看单一指标。</div></div>
+<div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>活动流量有副作用：</strong>大促带来的价格敏感用户，活动结束后复购率极低，可能拉低整体用户质量。</div></div>
+</div>`,
+    flashcards:[
+      {q:'GMV四杠杆各提升10%，增量相同。PM最应优先提升哪个？',a:'优先提升复购率。①成本最低——获客成本已付，边际成本≈0；②副作用最小；③效果持久；④LTV高——复购用户带口碑降低获客成本。'},
+      {q:'"只看DAU增长"是PM常见陷阱，为什么？',a:'流量要看质量不是数量。1000个薅羊毛用户不如100个有真实购买意图的用户。盲目买流量会稀释转化率，拉低整体GMV效率。应看"有效访客"。'},
+      {q:'提升客单价和转化率之间存在什么权衡？',a:'负相关：价格越高，购买门槛越高，转化率越低。正确策略：在高转化用户中推高客单价（关联推荐、套装），而不是直接提价。'},
+    ],
+    quiz:[
+      {q:'四个增长方案ROI最高的是？①买流量包 ②优化详情页转化率 ③推套装提客单价 ④会员积分提复购',opts:['A. 买流量包','B. 优化详情页','C. 推出套装','D. 会员积分系统'],ans:'D',expl:'会员积分系统提升复购率ROI最高——获客成本已付，留住用户再次购买的边际成本接近于零，且有长期效果。'},
+      {q:'GMV = 流量+转化率+客单价+复购率，这个公式正确吗？',opts:['A. 正确，GMV是四者之和','B. 错误，GMV是四者之积','C. 正确，只需要其中一个增长','D. 错误，只有流量最重要'],ans:'B',expl:'GMV = 流量 × 转化率 × 客单价 × 复购率，是乘法关系。每个因子提升10%，结果各提升10%，而不是叠加。'},
+    ],
+    practice:{
+      context:'你是某垂直美妆电商的PM。平台DAU 50万，月GMV 1亿元。数据：月访客500万，整体转化率2%，客单价100元，月复购率10%。老板希望下季度月GMV达到1.2亿，即增长20%。',
+      questions:['问题1：如果只能优化一个杠杆实现GMV+20%，你选哪个？请量化说明需要提升多少个百分点，以及对应的产品改进策略。','问题2：分析发现添加购物车的用户中，45%没有最终下单。这说明哪个杠杆出了问题？根因可能有哪些？如何用数据进一步定位？','问题3：美妆用户普遍存在"囤货"心理，如何设计一个产品功能同时提升客单价和复购率？请描述具体功能设计和预期指标变化。']
+    }
+  },
+  d3:{
+    title:'用户购物旅程',tag:'Day 3 · 第一周',
+    desc:'发现→浏览→决策→下单→收货→复购，完整链路每步设计要点与诊断方法。',
+    theory:`
+<div style="margin-bottom:14px">
+  <div style="font-size:9px;font-weight:700;color:var(--t4);text-transform:uppercase;letter-spacing:.1em;margin-bottom:10px">六阶段旅程全景</div>
+  <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:10px">
+    <div style="background:var(--s2);border:1px solid var(--bd);border-radius:9px;padding:10px;text-align:center">
+      <div style="font-size:18px;margin-bottom:4px">🔍</div>
+      <div style="font-size:11px;font-weight:700;color:var(--t1)">发现</div>
+      <div style="font-size:9px;color:var(--blue);font-weight:600;margin-top:3px">CTR 6-12%</div>
+      <div style="font-size:9px;color:var(--t4);margin-top:2px">搜索/推荐入口</div>
+    </div>
+    <div style="background:var(--s2);border:1px solid var(--bd);border-radius:9px;padding:10px;text-align:center">
+      <div style="font-size:18px;margin-bottom:4px">📱</div>
+      <div style="font-size:11px;font-weight:700;color:var(--t1)">浏览</div>
+      <div style="font-size:9px;color:var(--blue);font-weight:600;margin-top:3px">跳失率 40-70%</div>
+      <div style="font-size:9px;color:var(--t4);margin-top:2px">详情页体验</div>
+    </div>
+    <div style="background:var(--s2);border:1px solid var(--bd);border-radius:9px;padding:10px;text-align:center">
+      <div style="font-size:18px;margin-bottom:4px">🤔</div>
+      <div style="font-size:11px;font-weight:700;color:var(--t1)">决策</div>
+      <div style="font-size:9px;color:var(--amber);font-weight:600;margin-top:3px">加购率 15-30%</div>
+      <div style="font-size:9px;color:var(--t4);margin-top:2px">对比&优惠可见性</div>
+    </div>
+    <div style="background:var(--s2);border:1px solid var(--bd);border-radius:9px;padding:10px;text-align:center">
+      <div style="font-size:18px;margin-bottom:4px">💳</div>
+      <div style="font-size:11px;font-weight:700;color:var(--t1)">下单</div>
+      <div style="font-size:9px;color:var(--red);font-weight:600;margin-top:3px">结算转化 25-45%</div>
+      <div style="font-size:9px;color:var(--t4);margin-top:2px">支付流程流畅度</div>
+    </div>
+    <div style="background:var(--s2);border:1px solid var(--bd);border-radius:9px;padding:10px;text-align:center">
+      <div style="font-size:18px;margin-bottom:4px">📦</div>
+      <div style="font-size:11px;font-weight:700;color:var(--t1)">收货</div>
+      <div style="font-size:9px;color:var(--amber);font-weight:600;margin-top:3px">好评率>90%</div>
+      <div style="font-size:9px;color:var(--t4);margin-top:2px">物流透明度</div>
+    </div>
+    <div style="background:var(--s2);border:1px solid var(--bd);border-radius:9px;padding:10px;text-align:center">
+      <div style="font-size:18px;margin-bottom:4px">🔄</div>
+      <div style="font-size:11px;font-weight:700;color:var(--t1)">复购</div>
+      <div style="font-size:9px;color:var(--green);font-weight:600;margin-top:3px">30日复购 8-18%</div>
+      <div style="font-size:9px;color:var(--t4);margin-top:2px">个性化召回</div>
+    </div>
+  </div>
+</div>
+<div class="kp"><div class="kp-h">最高价值改进点 — 结算页</div>
+<div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>优惠券自动匹配：</strong>用户在结算页找不到优惠券是最大流失原因（占结算流失的38%）。解法：系统自动为订单匹配最优券组合。</div></div>
+<div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>支付方式丰富度：</strong>缺少用户偏好的支付方式导致18%的流失。先用数据看用户用什么支付，再做功能优先级。</div></div>
+<div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>退货政策展示：</strong>"30天无理由退货"的显著展示能提升新用户转化率12-18%，降低购买决策风险。</div></div>
+</div>
+<div class="pm-insight" style="margin-top:10px"><div class="pmi-label">加购≠意向，意向≠转化</div><div class="pmi-text">购物车是用户"可能想要"的缓冲区。高加购低转化说明用户有意愿但有障碍——通常是价格焦虑或支付摩擦。这是可以通过产品设计直接修复的问题。</div></div>`,
+    flashcards:[
+      {q:'结算页流失率突然上升15%，你的诊断思路是什么？',a:'①检查是否有功能改动（按钮位置、优惠券入口）；②看流失在哪个步骤；③对比不同支付方式的转化率；④看是否特定用户群（新用户vs老用户）；⑤检查优惠券是否被隐藏或失效。'},
+      {q:'为什么退货越容易，用户下次越敢买？',a:'退货门槛低降低了购买决策风险。"不满意可以退"→用户敢尝试高价商品→客单价提升→GMV增长。京东的退货体验是其高客单价用户信任的核心来源。'},
+      {q:'为什么"加购率高但转化率低"是严重的产品问题？',a:'用户有购买意愿但在最终下单时遇到阻碍。高加购低转化的根因通常是：价格焦虑（优惠券不可见）、支付摩擦、安全顾虑。每一个加购未转化都是已投入成本获得的意向白白浪费。'},
+    ],
+    quiz:[
+      {q:'步骤2的跳失率最高（68%），应该优先优化哪个步骤？',opts:['A. 优化步骤1，改进漏斗顶端影响最大','B. 优化步骤2，流失率最高，改善直接效果最大','C. 优化步骤5，最接近转化','D. 优化所有步骤'],ans:'B',expl:'优化漏斗中流失最严重的节点，边际效果最大——相同的改进幅度，在流失最高处的绝对收益最大。'},
+      {q:'新用户首单转化率（3%）远低于老用户复购转化率（12%），最核心原因是？',opts:['A. 新用户不了解商品','B. 新用户对平台缺乏信任，不确定是否值得购买','C. 新用户没有优惠券','D. 新用户手机网速慢'],ans:'B',expl:'信任是新用户最大的购买障碍。老用户已有成功购买体验，信任建立后复购决策成本大幅降低。这就是为什么"新用户首单优惠"、"30天无理由退货"本质上都在降低信任门槛。'},
+    ],
+    practice:{
+      context:'你是某中型电商的PM，主打家居家装品类。搜索进入商品页的用户中，70%在30秒内离开（高跳失率）；进入详情页的用户中，30%添加了购物车；购物车用户中，最终只有25%完成了下单支付。月UV 200万，整体转化率1.5%，低于行业平均2.8%。',
+      questions:['问题1：通过计算分析，这条转化漏斗中哪个环节的流失最严重？如果将最差环节改善20%，整体转化率会提升到多少？','问题2：家居家装用户决策周期较长（7-30天），这对产品设计有什么特殊挑战？你会如何设计"缩短决策周期"的产品功能？','问题3：某用户添加了购物车但30天没有购买，你认为她为什么没有购买？请设计一套"购物车挽回"产品方案，说明触达时机、触达方式和核心文案逻辑。']
+    }
+  },
+  d4:{
+    title:'搜索与推荐',tag:'Day 4 · 第一周',
+    desc:'主动意图型 vs 被动激发型，广告精准化飞轮，搜索CTR诊断实战。',
+    theory:`
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px">
+  <div style="background:var(--bld);border:1px solid var(--blb);border-radius:11px;padding:14px">
+    <div style="font-size:10px;font-weight:800;color:#8085f5;text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px">🔍 搜索 — 主动意图型</div>
+    <div style="font-size:12px;color:var(--t2);line-height:1.7">用户<strong style="color:var(--t1)">知道要什么</strong>，直接表达需求</div>
+    <div style="margin-top:8px">
+      <div class="score-bar-wrap"><div class="score-bar-lbl" style="width:60px;font-size:10px">转化率</div><div class="score-bar-track"><div class="score-bar-fill" style="width:78%;background:#8085f5"></div></div><span style="font-size:10px;color:#8085f5;font-weight:700">3-8%</span></div>
+      <div class="score-bar-wrap"><div class="score-bar-lbl" style="width:60px;font-size:10px">GMV贡献</div><div class="score-bar-track"><div class="score-bar-fill" style="width:40%;background:#8085f5"></div></div><span style="font-size:10px;color:#8085f5;font-weight:700">35-40%</span></div>
+    </div>
+  </div>
+  <div style="background:var(--gd);border:1px solid var(--gb);border-radius:11px;padding:14px">
+    <div style="font-size:10px;font-weight:800;color:var(--green);text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px">✨ 推荐 — 被动激发型</div>
+    <div style="font-size:12px;color:var(--t2);line-height:1.7">帮用户<strong style="color:var(--t1)">发现不知道的需求</strong></div>
+    <div style="margin-top:8px">
+      <div class="score-bar-wrap"><div class="score-bar-lbl" style="width:60px;font-size:10px">转化率</div><div class="score-bar-track"><div class="score-bar-fill" style="width:20%;background:var(--green)"></div></div><span style="font-size:10px;color:var(--green);font-weight:700">0.5-2%</span></div>
+      <div class="score-bar-wrap"><div class="score-bar-lbl" style="width:60px;font-size:10px">GMV贡献</div><div class="score-bar-track"><div class="score-bar-fill" style="width:70%;background:var(--green)"></div></div><span style="font-size:10px;color:var(--green);font-weight:700">60-65%</span></div>
+    </div>
+  </div>
+</div>
+<div class="info-card" style="margin-bottom:10px">
+  <div class="ic-l">广告精准化飞轮</div>
+  <div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;margin-top:8px">
+    <span class="flow-node">精准人群包</span><span class="flow-arrow">→</span>
+    <span class="flow-node">广告CTR↑</span><span class="flow-arrow">→</span>
+    <span class="flow-node">商家ROI↑</span><span class="flow-arrow">→</span>
+    <span class="flow-node">更多预算投放</span><span class="flow-arrow">→</span>
+    <span class="flow-node">平台收入↑</span><span class="flow-arrow">→</span>
+    <span class="flow-node">更多数据精准</span>
+  </div>
+</div>
+<div class="pm-insight"><div class="pmi-label">反直觉洞察：广告位增加≠收入增加</div><div class="pmi-text">广告位越多，每个广告位的稀缺性越低→广告CTR越低→商家ROI越低→商家撤预算→平台收入反而下降。正确做法是提升精准度而非增加数量——精准广告对用户来说就是"有用的推荐"。</div></div>`,
+    flashcards:[
+      {q:'搜索CTR从8%下降到6%，可能的原因有哪些？',a:'①广告位增加，自然结果被挤到更下方（最常见）；②搜索词变化，用户搜索更精准而排名靠后；③竞争加剧；④自然排序算法调整；⑤用户习惯改变（更倾向于推荐流）。诊断时要区分自然CTR vs 整体CTR。'},
+      {q:'推荐系统的"探索-利用"权衡是什么意思？',a:'利用（Exploitation）：推荐用户过去喜欢的内容，转化率高但体验会越来越窄（信息茧房）。探索（Exploration）：推荐用户未见过的内容。好的推荐系统要平衡：既满足当下需求，又不断扩展用户兴趣边界。'},
+      {q:'为什么"电商搜索"和"信息搜索"的产品逻辑完全不同？',a:'信息搜索（Google）：用户想找唯一正确答案，相关性最重要。电商搜索（淘宝）：要综合考虑相关性、价格竞争力、转化率预测、商家评级、广告出价、库存状态。本质是多目标优化问题，要同时兼顾用户体验和平台商业利益。'},
+    ],
+    quiz:[
+      {q:'搜索广告CTR（3.1%）远低于自然结果CTR（11.2%），正确的改进方向是？',opts:['A. 减少广告位，保护自然结果CTR','B. 增加更多广告位来提升广告收入','C. 用人群包定向提升广告精准度，让广告CTR接近自然CTR','D. 把广告位改成自然结果风格来提升CTR'],ans:'C',expl:'低广告CTR说明广告与用户意图不匹配。提升精准度而不是增加数量——精准广告对用户来说就是"有用的结果"，CTR提升，商家ROI提升，平台收入也随之提升。'},
+      {q:'哪个指标最能反映推荐系统的质量？',opts:['A. 推荐点击率（CTR）','B. 推荐引发的长期复购率','C. 推荐页面的PV（页面访问量）','D. 推荐算法的运行速度'],ans:'B',expl:'点击率高可能只是"标题党"，PV高可能是用户找不到内容反复刷新。推荐质量最终体现在：用户因为推荐而产生了之前没计划的购买，且这次购买带来了正向体验和后续复购。'},
+    ],
+    practice:{
+      context:'你是某综合电商搜索产品的PM。本周一早上收到数据警报：过去7天搜索模块整体CTR下降22%（9.8%→7.6%），但搜索UV未下降。同期，广告收入增长了8%。你需要在今天下午的周会上向VP汇报这个问题并给出解决方案。',
+      questions:['问题1：搜索CTR下降22%但广告收入增长8%，这两个数据放在一起能推断出什么结论？最可能的根因是什么？如何用数据验证你的假设？','问题2：如果你的假设是"广告位增加挤压了自然结果"，这在短期内对不同利益方（用户/商家/平台）各有什么影响？长期风险是什么？','问题3：请写出向VP汇报这个问题的完整四件套（发生了什么、损失多大、怎么解决、多久完成），并说明你的优先级判断依据。']
+    }
+  },
+  d5:{
+    title:'商家侧产品逻辑',tag:'Day 5 · 第一周',
+    desc:'视角切换：从买家PM变成供给侧PM，理解商家核心焦虑与平台工具体系。',
+    theory:`
+<div style="margin-bottom:12px">
+  <div style="font-size:9px;font-weight:700;color:var(--t4);text-transform:uppercase;letter-spacing:.1em;margin-bottom:10px">商家四大焦虑 → 四类产品机会</div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-bottom:12px">
+    <div style="background:var(--rd);border:1px solid rgba(226,59,74,.2);border-radius:10px;padding:12px">
+      <div style="font-size:10px;font-weight:800;color:var(--red);margin-bottom:5px">😰 没有流量（52%流失原因）</div>
+      <div style="font-size:11px;color:var(--t2)">产品机会：广告工具、活动报名、<strong style="color:var(--t1)">新商家流量包</strong></div>
+    </div>
+    <div style="background:var(--ad);border:1px solid rgba(236,126,0,.2);border-radius:10px;padding:12px">
+      <div style="font-size:10px;font-weight:800;color:var(--amber);margin-bottom:5px">😤 转化率低（28%流失原因）</div>
+      <div style="font-size:11px;color:var(--t2)">产品机会：详情页诊断、<strong style="color:var(--t1)">智能定价建议</strong>、竞品对标</div>
+    </div>
+    <div style="background:var(--bld);border:1px solid var(--blb);border-radius:10px;padding:12px">
+      <div style="font-size:10px;font-weight:800;color:#8085f5;margin-bottom:5px">😵 不懂数据（13%流失原因）</div>
+      <div style="font-size:11px;color:var(--t2)">产品机会：<strong style="color:var(--t1)">经营健康度评分</strong>、智能诊断报告</div>
+    </div>
+    <div style="background:var(--gd);border:1px solid var(--gb);border-radius:10px;padding:12px">
+      <div style="font-size:10px;font-weight:800;color:var(--green);margin-bottom:5px">😡 规则不透明（7%流失原因）</div>
+      <div style="font-size:11px;color:var(--t2)">产品机会：违规申诉系统、<strong style="color:var(--t1)">降权原因说明</strong></div>
+    </div>
+  </div>
+</div>
+<div style="margin-bottom:12px">
+  <div style="font-size:9px;font-weight:700;color:var(--t4);text-transform:uppercase;letter-spacing:.1em;margin-bottom:8px">商家分层 — ROI对比</div>
+  <div class="score-bar-wrap"><div class="score-bar-lbl">头部(1%)</div><div class="score-bar-track"><div class="score-bar-fill" style="width:38%;background:var(--amber)"></div></div><span class="score-tag tag-a">ROI 2.1x</span></div>
+  <div class="score-bar-wrap"><div class="score-bar-lbl">腰部(10%)⭐</div><div class="score-bar-track"><div class="score-bar-fill" style="width:95%;background:var(--green)"></div></div><span class="score-tag tag-g">ROI 6.2x</span></div>
+  <div class="score-bar-wrap"><div class="score-bar-lbl">长尾(90%)</div><div class="score-bar-track"><div class="score-bar-fill" style="width:58%;background:var(--blue)"></div></div><span class="score-tag" style="background:var(--bld);color:#8085f5;border-color:var(--blb)">ROI 3.8x</span></div>
+</div>
+<div class="pm-insight"><div class="pmi-label">商家工具 = 护城河，不只是服务</div><div class="pmi-text">商家在平台工具里积累3年的数据、习惯、团队培训都是迁移成本。即使竞品流量更好，这些沉没成本让他们难以离开。这是比流量补贴更持久的护城河——产品的战略价值远超其表面功能。</div></div>`,
+    flashcards:[
+      {q:'新商家30日留存率35%，最大的流失断层在哪里？根本原因是什么？',a:'最大断层在"第一单成交后"——完成第一单（22%）的商家中有27%随即放弃，留存仅16%。根因：①新手流量包用完后出现流量悬崖；②平台无引导告诉"下一步做什么"；③不知道如何自主获流量。'},
+      {q:'为什么腰部商家是平台增长最大的杠杆？',a:'腰部商家（Top 10%）GMV贡献40-50%，有增长意愿但缺专业运营能力，产品工具赋能ROI最高。且成长为头部后，因为是平台"帮他们长大的"，忠诚度极高。'},
+      {q:'商家数据工具为什么是平台护城河而不只是服务工具？',a:'商家在平台工具里积累的数据、习惯、团队培训，都是迁移成本。用了3年生意参谋的商家，历史数据在淘宝、运营习惯已淘宝化——即使拼多多流量更好，迁移成本让他们难以离开。'},
+      {q:'新商家激活三阶段，每阶段的核心目标是什么？',a:'D0-D2入驻期：降低上架门槛，目标"快速上架5+商品"。D3-D12冷启动期：解决零成交（流量包+活动推荐+ROI显示），目标"完成第一笔成交"。D12-D30成长期：接住第一单后断层（成长任务+健康评分+下一步引导），目标"建立持续经营信心"。'},
+    ],
+    quiz:[
+      {q:'为什么腰部商家是平台增长最大的杠杆，而不是头部商家？',opts:['A. 腰部数量最多，总GMV最大','B. 腰部有增长意愿但缺乏能力，工具赋能ROI最高，成长后粘性更强','C. 头部商家已稳定，不需要帮助','D. 腰部商家付费意愿更强'],ans:'B',expl:'腰部商家有增长意愿但缺专业能力，产品工具赋能ROI最高。且成长为头部后，因为是平台帮他们长大的，忠诚度极高。'},
+      {q:'商家数据工具（如生意参谋）对平台最重要的战略价值是？',opts:['A. 直接产生付费收入','B. 提升商家满意度评分','C. 绑定商家，提高迁移成本，形成护城河','D. 降低平台客服成本'],ans:'C',expl:'商家在平台工具里积累3年的数据、习惯、团队培训，都是迁移成本。即使竞品流量更好，也难以轻易离开。这是比流量补贴更持久的护城河。'},
+      {q:'新商家冷启动期（D3-D12）最核心的产品设计是？',opts:['A. 优化商家后台UI界面','B. 流量包+活动推荐+ROI实时显示，帮商家完成第一笔成交','C. 增加商家客服人员','D. 降低入驻门槛'],ans:'B',expl:'冷启动期核心目标是帮商家完成第一笔成交，建立经营信心。流量包解决流量来源，活动推荐提供低门槛曝光，ROI显示让商家敢投广告。'},
+    ],
+    practice:{
+      context:'你是某中型综合电商商家侧的PM。数据显示：每月新入驻商家1000家，30天留存率35%（即650家在1个月内放弃）。详细漏斗数据：完成注册100%→上架第一个商品71%→上架5+商品43%→获得第一次访客38%→完成第一笔成交22%→第一笔成交后继续经营16%。',
+      questions:['问题1：从漏斗数据分析，哪个环节的环比流失率最高？这个环节的流失说明了什么根本问题？请用数据支撑你的分析。','问题2：针对"完成第一笔成交→继续经营"这个断层（22%→16%），你认为主要原因是什么？请设计一个具体的产品功能来"接住"这批已经成交过的商家。','问题3：如果你是这个项目的PM，你会选择哪个环节优先改善？请用RICE评分框架（Reach/Impact/Confidence/Effort）对三个改进方向进行评估和排序，并说明你的决策理由。']
+    }
+  },
+
+  d6:{
+    title:'平台规则与治理',tag:'Day 6 · 第一周',
+    desc:'平台是裁判员，规则设计决定生态健康。理解违规处理、算法公平性与申诉机制。',
+    theory:`
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px">
+  <div style="background:var(--rd);border:1px solid rgba(226,59,74,.2);border-radius:11px;padding:14px">
+    <div style="font-size:10px;font-weight:800;color:var(--red);text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px">⚖️ 规则的本质</div>
+    <div style="font-size:12px;color:var(--t2);line-height:1.7">平台规则 = <strong style="color:var(--t1)">激励系统设计</strong><br>好的规则奖励好行为，惩罚差行为，形成正向生态</div>
+  </div>
+  <div style="background:var(--gd);border:1px solid var(--gb);border-radius:11px;padding:14px">
+    <div style="font-size:10px;font-weight:800;color:var(--green);text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px">🎯 PM的角色</div>
+    <div style="font-size:12px;color:var(--t2);line-height:1.7">既要保护买家不受伤害，又要让商家经营环境公平透明，<strong style="color:var(--t1)">两者缺一不可</strong></div>
+  </div>
+</div>
+<div class="kp"><div class="kp-h">平台治理四大维度</div>
+<div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>内容/商品质量：</strong>假货、违禁品、虚假描述。后果：买家信任崩塌，飞轮反转。工具：AI质检+人工抽检+用户举报。</div></div>
+<div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>竞争公平性：</strong>刷单、黑搜、恶意差评。后果：劣币驱逐良币，优质商家离开。工具：行为模式检测+账号风控。</div></div>
+<div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>价格秩序：</strong>价格欺诈、大数据杀熟。后果：用户愤怒、媒体曝光、监管介入。</div></div>
+<div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>数据安全：</strong>用户隐私保护、第三方数据滥用。后果：法律风险+品牌声誉损失。</div></div>
+</div>
+<div class="info-card" style="margin-top:10px">
+  <div class="ic-l">违规处理的渐进原则</div>
+  <div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;margin-top:8px">
+    <span class="flow-node">提醒警告</span><span class="flow-arrow">→</span>
+    <span class="flow-node">功能限制</span><span class="flow-arrow">→</span>
+    <span class="flow-node">降权处罚</span><span class="flow-arrow">→</span>
+    <span class="flow-node">暂停经营</span><span class="flow-arrow">→</span>
+    <span class="flow-node">永久封禁</span>
+  </div>
+</div>
+<div class="pm-insight" style="margin-top:10px"><div class="pmi-label">规则透明度是核心产品能力</div><div class="pmi-text">商家最怕的不是被处罚，而是"不知道为什么被处罚"。申诉通道设计、违规原因说明、规则变更提前告知——这些"规则可读性"功能能将商家因治理导致的流失降低40%以上。</div></div>`,
+    flashcards:[
+      {q:'平台为什么不能一开始就采取最严格的惩罚措施？',a:'渐进原则：①减少误判代价（新商家可能是无意为之）；②给商家改正机会，提高留存；③避免大量好商家因规则理解偏差被一刀切，破坏供给侧生态。'},
+      {q:'刷单行为对平台生态最大的危害是什么？',a:'核心危害：①扭曲搜索排名算法，让真实优质商品被劣质刷单商品压制；②破坏推荐系统准确性；③降低平台整体转化率——用户被诱导购买差商品后差评率上升，信任下降。'},
+      {q:'数据杀熟的产品本质是什么？为什么说它是自杀行为？',a:'数据杀熟 = 用用户画像对同一商品差异定价。短期提升客单价，但一旦曝光：①用户大量流失；②监管介入罚款；③品牌声誉永久受损。长期ROI极低，是典型的以短期收益损害长期价值的决策。'},
+    ],
+    quiz:[
+      {q:'某平台发现一批商家通过刷单提升排名，最合理的处理方式是？',opts:['A. 立即全部永久封号，零容忍','B. 渐进处理：警告→降权→封号，并完善检测机制','C. 只要销量真实就不管','D. 向被刷单受益商家收费'],ans:'B',expl:'渐进处理减少误判代价，同时给商家改正机会。关键是同步完善检测机制，形成威慑。一刀切容易误伤正常商家，破坏供给生态。'},
+      {q:'申诉通道对商家侧最重要的价值是？',opts:['A. 减少客服工作量','B. 提升商家对平台规则公平性的信任，降低因治理导致的流失','C. 帮助平台了解哪些规则需要修改','D. 为违规商家提供洗白机会'],ans:'B',expl:'商家最怕"不透明"，申诉通道让商家感受到"即使犯错也有机会说明情况"，这是维持商家经营信心的核心机制之一。'},
+    ],
+    practice:{
+      context:'某综合电商平台近期发现：①平台整体差评率上升至8%（行业均值3%）；②头部商家开始对平台合规要求表达强烈不满；③同时有媒体报道该平台存在"大数据杀熟"现象（老用户看到的价格比新用户高15%）。你是平台规则产品的PM。',
+      questions:['问题1：这三个问题的优先级如何排序？请说明你的判断依据（从商业风险、用户影响、紧急程度三个维度分析）。','问题2：针对媒体曝光的"大数据杀熟"问题，你会如何设计一个产品方案来解决这个问题？同时如何在内部向业务团队解释为什么不能做杀熟？','问题3：如何设计一个"规则透明度"产品功能，让商家在被处罚时能清楚了解原因，同时让平台能持续优化规则质量？']
+    }
+  },
+  d7:{
+    title:'第一周复习 · 综合项目',tag:'Day 7 · 第一周',
+    desc:'整合前6天所有知识，完成一个完整的电商PM诊断项目：平台健康度全面分析。',
+    theory:`
+<div style="margin-bottom:14px">
+  <div style="font-size:9px;font-weight:700;color:var(--t4);text-transform:uppercase;letter-spacing:.1em;margin-bottom:10px">第一周知识体系回顾</div>
+  <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:12px">
+    <div style="background:var(--bld);border:1px solid var(--blb);border-radius:9px;padding:10px;text-align:center;cursor:pointer" onclick="go('d1')">
+      <div style="font-size:14px;margin-bottom:4px">🌀</div>
+      <div style="font-size:11px;font-weight:700;color:var(--t1)">D1 双边市场</div>
+      <div style="font-size:9px;color:var(--t3);margin-top:2px">飞轮·网络效应·冷启动</div>
+    </div>
+    <div style="background:var(--gd);border:1px solid var(--gb);border-radius:9px;padding:10px;text-align:center;cursor:pointer" onclick="go('d2')">
+      <div style="font-size:14px;margin-bottom:4px">📊</div>
+      <div style="font-size:11px;font-weight:700;color:var(--t1)">D2 GMV模型</div>
+      <div style="font-size:9px;color:var(--t3);margin-top:2px">四杠杆·ROI优先级</div>
+    </div>
+    <div style="background:var(--ad);border:1px solid rgba(236,126,0,.25);border-radius:9px;padding:10px;text-align:center;cursor:pointer" onclick="go('d3')">
+      <div style="font-size:14px;margin-bottom:4px">🛒</div>
+      <div style="font-size:11px;font-weight:700;color:var(--t1)">D3 购物旅程</div>
+      <div style="font-size:9px;color:var(--t3);margin-top:2px">六阶段·漏斗诊断</div>
+    </div>
+    <div style="background:var(--bld);border:1px solid var(--blb);border-radius:9px;padding:10px;text-align:center;cursor:pointer" onclick="go('d4')">
+      <div style="font-size:14px;margin-bottom:4px">🔍</div>
+      <div style="font-size:11px;font-weight:700;color:var(--t1)">D4 搜索推荐</div>
+      <div style="font-size:9px;color:var(--t3);margin-top:2px">精准化·飞轮·汇报</div>
+    </div>
+    <div style="background:var(--gd);border:1px solid var(--gb);border-radius:9px;padding:10px;text-align:center;cursor:pointer" onclick="go('d5')">
+      <div style="font-size:14px;margin-bottom:4px">🏪</div>
+      <div style="font-size:11px;font-weight:700;color:var(--t1)">D5 商家产品</div>
+      <div style="font-size:9px;color:var(--t3);margin-top:2px">四大焦虑·分层运营</div>
+    </div>
+    <div style="background:var(--rd);border:1px solid rgba(226,59,74,.2);border-radius:9px;padding:10px;text-align:center;cursor:pointer" onclick="go('d6')">
+      <div style="font-size:14px;margin-bottom:4px">⚖️</div>
+      <div style="font-size:11px;font-weight:700;color:var(--t1)">D6 平台治理</div>
+      <div style="font-size:9px;color:var(--t3);margin-top:2px">规则设计·申诉·公平</div>
+    </div>
+  </div>
+</div>
+<div class="pm-insight"><div class="pmi-label">第一周核心认知升级</div><div class="pmi-text">电商PM的核心能力不是懂某一个功能，而是能同时在<strong>买家体验、商家经营、平台商业</strong>三个视角之间快速切换，找到三者利益的最大公约数。每一个产品决策都要问：这对飞轮有什么影响？</div></div>`,
+    flashcards:[
+      {q:'用一句话总结电商平台的商业本质是什么？',a:'电商平台是双边市场，通过连接买家和商家产生价值，通过广告费和佣金变现，通过飞轮效应建立护城河。'},
+      {q:'如果GMV下降了，第一步应该怎么分析？',a:'用乘法公式拆解：GMV = 流量 × 转化率 × 客单价 × 复购率。先看哪个分项下降了，再进入该分项做二级拆解（如转化率下降→漏斗哪个步骤）。'},
+      {q:'一个优秀的电商PM，最核心的产品直觉是什么？',a:'任何产品决策都要考虑三角平衡：①买家体验（是否更方便/信任）；②商家经营（是否更赚钱/留存）；③平台商业（是否可持续变现）。三者不平衡会导致飞轮减速。'},
+    ],
+    quiz:[
+      {q:'以下哪个决策同时损害了三方（买家/商家/平台）的利益？',opts:['A. 提升结算页优惠券可见性','B. 增加广告位数量但不提升精准度','C. 为新商家提供免费流量包','D. 推出退货无忧保障'],ans:'B',expl:'增加广告位但不提升精准度→用户体验差（无关广告多）→商家ROI低（CTR下降）→平台收入长期下降（商家减少投放）。三方皆输。'},
+      {q:'某平台考虑推出"最低价保障"（用户发现更低价可获赔付），这个功能的核心风险是？',opts:['A. 技术实现太复杂','B. 商家会对此强烈反对','C. 可能引发商家恶性价格战，破坏供给侧生态','D. 赔付成本太高'],ans:'C',expl:'最低价保障会迫使所有商家参与价格战，利润空间压缩→商家投入品质的资源减少→商品质量下降→用户体验反而变差。短期对用户有利，长期损害整体生态。'},
+    ],
+    practice:{
+      context:'综合项目：某头部电商平台本季度出现了以下问题：①GMV增速从20%降至5%；②新商家30日留存率从45%降至28%；③用户NPS从55降至38；④搜索CTR下降18%。你被任命为专项诊断PM，需要提交一份完整的诊断报告和改进路线图。',
+      questions:['问题1：这四个问题之间有什么内在关联？请用"因果链"画出它们的关系，并判断最根本的原因在哪里。','问题2：如果资源有限，只能选择一个优先改善方向，你会选哪个？请用RICE框架评估所有选项，并说明你的选择理由。','问题3：设计一个90天改善路线图，分三个阶段（0-30天/30-60天/60-90天），每个阶段明确目标、关键动作、验证指标。']
+    }
+  },
+  d8:{
+    title:'大促活动设计',tag:'Day 8 · 第二周',
+    desc:'双11、618的产品逻辑：如何设计让用户兴奋、商家赚钱、平台盈利的大促体系。',
+    theory:`
+<div class="info-card" style="margin-bottom:12px">
+  <div class="ic-l">大促活动的四重目标</div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-top:8px">
+    <div style="background:var(--s3);border-radius:8px;padding:10px"><div style="font-size:10px;font-weight:700;color:var(--green);margin-bottom:3px">📈 GMV增长</div><div style="font-size:11px;color:var(--t2)">短期内大幅提升销售额，实现季度目标</div></div>
+    <div style="background:var(--s3);border-radius:8px;padding:10px"><div style="font-size:10px;font-weight:700;color:var(--blue);margin-bottom:3px">👥 用户拉新</div><div style="font-size:11px;color:var(--t2)">大促是最高效的获客时机，CPL成本最低</div></div>
+    <div style="background:var(--s3);border-radius:8px;padding:10px"><div style="font-size:10px;font-weight:700;color:var(--amber);margin-bottom:3px">🔄 用户激活</div><div style="font-size:11px;color:var(--t2)">唤醒沉睡用户，提升整体活跃度</div></div>
+    <div style="background:var(--s3);border-radius:8px;padding:10px"><div style="font-size:10px;font-weight:700;color:var(--red);margin-bottom:3px">🏪 商家赋能</div><div style="font-size:11px;color:var(--t2)">帮助商家去库存、拓客群、提知名度</div></div>
+  </div>
+</div>
+<div style="margin-bottom:12px">
+  <div style="font-size:9px;font-weight:700;color:var(--t4);text-transform:uppercase;letter-spacing:.1em;margin-bottom:8px">大促时间线设计</div>
+  <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap">
+    <span class="flow-node" style="background:var(--bld);border-color:var(--blb);color:#8085f5">预热期(T-30)</span><span class="flow-arrow">→</span>
+    <span class="flow-node">预售开启(T-15)</span><span class="flow-arrow">→</span>
+    <span class="flow-node">加购收藏(T-7)</span><span class="flow-arrow">→</span>
+    <span class="flow-node">爆发期(T+0)</span><span class="flow-arrow">→</span>
+    <span class="flow-node" style="background:var(--gd);border-color:var(--gb);color:var(--green)">返场收尾(T+3)</span>
+  </div>
+</div>
+<div class="kp"><div class="kp-h">大促设计的核心陷阱</div>
+<div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>促销疲劳：</strong>大促太频繁，用户学会"等折扣再买"，平常销售额持续下降，大促效果也递减。</div></div>
+<div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>库存踩踏：</strong>热门商品秒售罄，用户失望离开；冷门商品积压，商家亏损，下次参与意愿降低。</div></div>
+<div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>价格战副作用：</strong>大促期间的价格敏感用户大促后复购率仅为普通用户的30%，拉低整体用户质量。</div></div>
+</div>
+<div class="pm-insight"><div class="pmi-label">双11的本质不是打折</div><div class="pmi-text">双11本质上是<strong>一个社会化注意力放大器</strong>：把中国消费者的购买决策集中到同一个时间点，通过社会压力（抢购氛围）和信息放大（朋友都在买）来压缩决策周期，而不只是因为便宜。这才是双11GMV如此巨大的底层逻辑。</div></div>`,
+    flashcards:[
+      {q:'大促活动为什么要设计"预售"环节？',a:'预售核心价值：①确认需求，商家可以按需备货，减少库存踩踏；②锁定用户，付定金用户大促当天转化率接近100%；③制造期待感，预热期用户不断刷新活跃度，带动算法推荐。'},
+      {q:'大促结束后，如何评估大促的真实质量（而非只看GMV）？',a:'关键指标：①大促期间新用户的30日留存率；②大促期间购买用户vs非大促购买用户的复购率对比；③商家大促后的满意度和复投率；④退货率（高退货率说明大促冲动消费多）。'},
+      {q:'为什么说"每次大促都是平台最好的数据收集机会"？',a:'大促期间用户行为最集中、最典型：①哪类商品搜索量激增→品类趋势；②哪类用户最终没有下单→流失原因分析；③哪些价格区间转化最好→定价策略；④新用户vs老用户行为差异→个性化策略优化。'},
+    ],
+    quiz:[
+      {q:'某平台大促当天GMV同比增长50%，但大促后一个月整体GMV同比下降8%。最可能的原因是？',opts:['A. 大促太成功，用户都买完了','B. 大促提前透支了用户需求，且吸引了大量低质量价格敏感用户','C. 大促期间服务器宕机损害了用户体验','D. 竞争对手在大促后发起了更大折扣'],ans:'B',expl:'大促"借未来的GMV"——用户在大促囤货后短期内不需要再购买，且低价吸引来的价格敏感用户平常不活跃。优秀的大促设计要最大化"高价值新用户获取"而非只追GMV。'},
+      {q:'大促期间应该如何分配商家资源（流量扶持）？',opts:['A. 平均分配，公平原则','B. 全部给头部品牌，最大化GMV','C. 优先腰部有增长潜力的商家，配合头部保底GMV','D. 只给付费广告商家，最大化收入'],ans:'C',expl:'头部商家有自带流量不需要过多扶持；腰部商家借助大促能实现跨越式增长，且成本更低。同时配合头部保证基础GMV。这是大促资源分配的最优策略。'},
+    ],
+    practice:{
+      context:'你是某垂直母婴电商平台的PM，计划在6月1日儿童节前后举办首次大促活动。平台月GMV 5000万，用户规模200万，商家500家（头部20家占GMV 60%）。预期大促期间GMV翻3倍达到1.5亿。',
+      questions:['问题1：设计这次大促的"预热-爆发-收尾"完整时间线，每个阶段的核心运营动作和对应的产品功能支撑是什么？','问题2：如何防止大促后的"GMV崖"（大促结束后销售额断崖式下跌）？请设计至少3个具体的产品机制。','问题3：大促期间如何平衡头部商家（占GMV 60%）和腰部商家（100-480家）的流量分配？设计一个具体的分层流量策略。']
+    }
+  },
+  d9:{
+    title:'促销工具体系',tag:'Day 9 · 第二周',
+    desc:'优惠券、满减、折扣、秒杀——每种工具的适用场景、设计要点与滥用风险。',
+    theory:`
+<div style="margin-bottom:12px">
+  <div style="font-size:9px;font-weight:700;color:var(--t4);text-transform:uppercase;letter-spacing:.1em;margin-bottom:10px">主流促销工具对比</div>
+  <div style="display:flex;flex-direction:column;gap:6px">
+    <div style="background:var(--s2);border:1px solid var(--bd);border-radius:9px;padding:10px;display:grid;grid-template-columns:80px 1fr 1fr;gap:8px;align-items:center">
+      <div style="font-size:11px;font-weight:700;color:var(--t1)">🎫 优惠券</div>
+      <div style="font-size:11px;color:var(--t2)">定向发放，精准触达目标用户群，提升复购</div>
+      <div><span class="score-tag tag-g">复购↑</span> <span class="score-tag tag-a">成本中</span></div>
+    </div>
+    <div style="background:var(--s2);border:1px solid var(--bd);border-radius:9px;padding:10px;display:grid;grid-template-columns:80px 1fr 1fr;gap:8px;align-items:center">
+      <div style="font-size:11px;font-weight:700;color:var(--t1)">💰 满减</div>
+      <div style="font-size:11px;color:var(--t2)">提升客单价，引导用户凑单，跨品类销售</div>
+      <div><span class="score-tag" style="background:var(--bld);color:#8085f5;border-color:var(--blb)">客单价↑</span></div>
+    </div>
+    <div style="background:var(--s2);border:1px solid var(--bd);border-radius:9px;padding:10px;display:grid;grid-template-columns:80px 1fr 1fr;gap:8px;align-items:center">
+      <div style="font-size:11px;font-weight:700;color:var(--t1)">⚡ 秒杀</div>
+      <div style="font-size:11px;color:var(--t2)">制造稀缺感，引流获客，提升平台活跃度</div>
+      <div><span class="score-tag tag-g">流量↑</span> <span class="score-tag tag-r">利润↓</span></div>
+    </div>
+    <div style="background:var(--s2);border:1px solid var(--bd);border-radius:9px;padding:10px;display:grid;grid-template-columns:80px 1fr 1fr;gap:8px;align-items:center">
+      <div style="font-size:11px;font-weight:700;color:var(--t1)">🔖 折扣</div>
+      <div style="font-size:11px;color:var(--t2)">简单直接，清库存效果最好，但损害品牌调性</div>
+      <div><span class="score-tag tag-a">库存↓</span> <span class="score-tag tag-r">品牌↓</span></div>
+    </div>
+  </div>
+</div>
+<div class="kp"><div class="kp-h">促销工具的核心设计原则</div>
+<div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>目标导向：</strong>提升客单价用满减，提升复购用优惠券，获新客用秒杀，清库存用折扣。用错工具会适得其反。</div></div>
+<div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>门槛设计：</strong>满减门槛应设在"当前客单价×1.2-1.5倍"，让大多数用户感觉"再加一点就能用"，而不是遥不可及。</div></div>
+<div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>频率控制：</strong>优惠券发放过频会导致用户"等券再买"，平常转化率下降。最佳频率是让用户感到"有点稀缺但不难获得"。</div></div>
+</div>
+<div class="pm-insight"><div class="pmi-label">促销不应该是止痛药</div><div class="pmi-text">很多PM把促销当作解决GMV下滑的快速手段。但频繁促销会训练用户价格敏感性，损害品牌价值，并形成"不促不买"的恶性循环。促销应该是战略工具，而不是救火手段。</div></div>`,
+    flashcards:[
+      {q:'满减活动的门槛如何设计才最有效？',a:'门槛 = 目标客单价 × 1.2-1.5。让约60-70%的用户只需再加一两件就能达到门槛。门槛太高（用户直接放弃）或太低（不需要凑单）都浪费了工具的杠杆效果。'},
+      {q:'优惠券应该定向发放还是公开发放？区别是什么？',a:'定向更高效：针对高价值用户（高LTV、高复购可能性）发放，ROI更高，不浪费补贴预算。公开发放吸引大量价格敏感用户，补贴成本高但用户质量参差。通常结合使用：大促预热公开发放获新客，日常定向发放维系老客。'},
+      {q:'为什么说秒杀是"双刃剑"？',a:'好处：极低价格制造话题性，大量引流；坏处：①SKU过少导致大量用户失望离开；②商家亏损，参与意愿持续降低；③吸引来的用户都是价格敏感型，正常价格时不会再买。秒杀适合引流但不适合作为日常促销工具。'},
+    ],
+    quiz:[
+      {q:'某电商平台美妆品类客单价通常为150元，想通过满减活动提升客单价到200元，最合理的门槛设置是？',opts:['A. 满100减10','B. 满180减30','C. 满300减50','D. 满150减20'],ans:'B',expl:'满180减30：门槛在目标客单价200元附近（×0.9），让用户感觉"再加30元就能省30元"，实际是平台在150-180区间创造了凑单动力。满100太低没有提升作用，满300太高大多数用户直接放弃。'},
+      {q:'以下哪个促销策略最能有效提升用户的长期复购率？',opts:['A. 每天秒杀活动','B. 全场8折','C. 个性化优惠券（根据用户购买记录定向发放）','D. 所有商品买一送一'],ans:'C',expl:'个性化优惠券命中用户真实需求，用户感受到"平台了解我"，复购意愿最强。全场折扣和秒杀吸引价格敏感型用户，对长期复购贡献有限。'},
+    ],
+    practice:{
+      context:'你是某头部女装电商平台的促销产品PM。平台目前每周发放满100减10的通用优惠券，效果越来越差（券使用率从60%降至32%，复购率也在下降）。老板要求你重新设计促销工具体系，目标：提升30%的GMV，同时控制补贴成本。',
+      questions:['问题1：当前优惠券效果下降的根本原因是什么？请从用户行为心理学的角度分析，并提出你的诊断结论。','问题2：设计一套新的促销工具组合方案，需要包含至少3种工具，说明每种工具针对哪类用户、解决什么问题、预期效果指标。','问题3：如何用数据证明新促销方案比旧方案更好？设计一个A/B测试方案，包括实验分组、测试时间、评估指标和决策标准。']
+    }
+  },
+  d10:{
+    title:'会员体系设计',tag:'Day 10 · 第二周',
+    desc:'为什么会员体系是留存最强武器？从积分到分级，设计让用户上瘾的成长体系。',
+    theory:`
+<div style="margin-bottom:12px">
+  <div style="font-size:9px;font-weight:700;color:var(--t4);text-transform:uppercase;letter-spacing:.1em;margin-bottom:10px">会员体系核心价值</div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-bottom:12px">
+    <div style="background:var(--gd);border:1px solid var(--gb);border-radius:10px;padding:12px">
+      <div style="font-size:28px;font-weight:700;color:var(--green);line-height:1">3.8x</div>
+      <div style="font-size:11px;color:var(--t2);margin-top:4px">会员用户 vs 非会员用户的LTV倍数（行业均值）</div>
+    </div>
+    <div style="background:var(--bld);border:1px solid var(--blb);border-radius:10px;padding:12px">
+      <div style="font-size:28px;font-weight:700;color:#8085f5;line-height:1">62%</div>
+      <div style="font-size:11px;color:var(--t2);margin-top:4px">高级会员升级前后的复购率提升幅度（头部平台数据）</div>
+    </div>
+  </div>
+</div>
+<div class="info-card" style="margin-bottom:10px">
+  <div class="ic-l">会员分级设计原则（以4级为例）</div>
+  <div style="margin-top:10px">
+    <div class="score-bar-wrap"><div class="score-bar-lbl">普通会员</div><div class="score-bar-track"><div class="score-bar-fill" style="width:30%;background:var(--t4)"></div></div><span style="font-size:10px;color:var(--t3);font-weight:600">70%用户</span></div>
+    <div class="score-bar-wrap"><div class="score-bar-lbl">银卡会员</div><div class="score-bar-track"><div class="score-bar-fill" style="width:55%;background:var(--blue)"></div></div><span style="font-size:10px;color:var(--blue);font-weight:600">20%用户</span></div>
+    <div class="score-bar-wrap"><div class="score-bar-lbl">金卡会员</div><div class="score-bar-track"><div class="score-bar-fill" style="width:75%;background:var(--amber)"></div></div><span style="font-size:10px;color:var(--amber);font-weight:600">8%用户</span></div>
+    <div class="score-bar-wrap"><div class="score-bar-lbl">黑卡会员</div><div class="score-bar-track"><div class="score-bar-fill" style="width:95%;background:var(--green)"></div></div><span style="font-size:10px;color:var(--green);font-weight:600">2%用户</span></div>
+  </div>
+</div>
+<div class="kp"><div class="kp-h">会员体系设计的关键决策</div>
+<div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>付费vs免费：</strong>付费会员（如88VIP）筛选高价值用户，免费会员覆盖更多用户。付费会员ARPU是免费会员的5-10倍。</div></div>
+<div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>积分体系：</strong>积分必须"稀缺但可及"——太容易获得无激励效果，太难获得让用户放弃。最佳设计是让核心用户持续感受到"快到下一级了"。</div></div>
+<div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>权益设计：</strong>免邮>折扣>优先客服>专属活动。实物权益（免邮）感知最强，折扣权益感知次之，服务权益感知最弱但成本最低。</div></div>
+</div>
+<div class="pm-insight"><div class="pmi-label">会员体系的真正目的不是折扣</div><div class="pmi-text">顶级的会员体系（如星巴克Gold、Amazon Prime）不是在卖折扣，而是在卖<strong>"身份认同"和"归属感"</strong>。当用户认为"我是一个XX平台的黑卡会员"时，品牌已经成为他自我认同的一部分，这才是最难复制的护城河。</div></div>`,
+    flashcards:[
+      {q:'积分体系的"稀缺感"设计原则是什么？',a:'"快到手但还没到"是最强激励状态。设计积分门槛时，确保大约60-70%的活跃用户距离下一个目标/等级只差10-20%，这个区间用户行动意愿最强（心理学：目标接近效应）。'},
+      {q:'付费会员和免费会员，PM应该优先建设哪个？',a:'取决于平台阶段：早期用免费会员积累用户量和数据；中期同时运营，用付费会员筛选高价值用户；成熟期付费会员是核心，因为付费意愿本身就是高价值用户的筛选器，且付费后用户沉没成本更高，留存率更好。'},
+      {q:'如何量化评估会员体系的健康度？',a:'核心指标：①各级会员的复购率对比；②会员升级率（普通→银卡）；③会员降级率（触发留存干预）；④ARPU对比（会员vs非会员）；⑤会员续费率（付费会员）。最重要的是升级/降级的"流量"而非存量。'},
+    ],
+    quiz:[
+      {q:'某电商平台准备推出付费会员，年费定价最合理的参考是？',opts:['A. 竞争对手定价的80%','B. 等于一次会员权益使用的价值','C. 用户平均年度权益价值的40-60%（让用户感觉"赚了"）','D. 尽可能高，筛选最高价值用户'],ans:'C',expl:'付费会员定价关键是让用户感受到"比我付的钱更值"。用户年度权益价值的40-60%是最优区间——太便宜感觉不高端，太贵用户算不回来不买。Amazon Prime的定价策略就是让大多数Prime用户感觉"一两次使用就回本了"。'},
+      {q:'用户积分将要过期，最合理的产品设计是？',opts:['A. 直接清零，激励用户更活跃','B. 自动续期，提升用户好感','C. 提前N天通知+给出使用建议，保留但制造紧迫感','D. 转为现金退款'],ans:'C',expl:'提前通知+使用建议：①保留积分不清零，维持用户好感；②制造紧迫感激励使用；③给出具体使用建议降低决策成本。纯清零会引发用户反感，自动续期则丧失了激励效果。'},
+    ],
+    practice:{
+      context:'你是某头部美妆电商的会员产品PM。当前状况：有普通会员体系但无分级，用户活跃度低，复购率只有8%，远低于行业均值15%。用户规模500万，其中月活跃用户100万，高消费用户（年消费>2000元）约5万人。',
+      questions:['问题1：设计一套4级会员体系（命名、升级标准、核心权益），需要考虑每级的用户数量目标和权益成本控制。','问题2：如何设计"会员升级提醒"功能，在用户即将升级时最大化其行动意愿？从推送时机、文案逻辑、产品形态三个维度设计。','问题3：6个月后如何评估这套会员体系是否成功？设计具体的成功标准和核心评估指标（至少5个）。']
+    }
+  },
+  d11:{
+    title:'直播电商产品逻辑',tag:'Day 11 · 第二周',
+    desc:'为什么直播能成为万亿GMV的新引擎？理解直播电商的产品逻辑与PM的核心工作。',
+    theory:`
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px">
+  <div style="background:var(--rd);border:1px solid rgba(226,59,74,.2);border-radius:11px;padding:14px">
+    <div style="font-size:10px;font-weight:800;color:var(--red);margin-bottom:8px">📺 传统货架电商</div>
+    <div style="font-size:12px;color:var(--t2);line-height:1.8">用户<strong style="color:var(--t1)">主动搜索</strong>→浏览→决策→购买<br>平均决策时间：<strong style="color:var(--t1)">2-7天</strong></div>
+  </div>
+  <div style="background:var(--rd);border:1px solid rgba(226,59,74,.3);border-radius:11px;padding:14px">
+    <div style="font-size:10px;font-weight:800;color:#ff4757;margin-bottom:8px">🔴 直播电商</div>
+    <div style="font-size:12px;color:var(--t2);line-height:1.8">主播创造需求→实时演示→稀缺制造→即刻购买<br>平均决策时间：<strong style="color:#ff4757">30-120秒</strong></div>
+  </div>
+</div>
+<div class="info-card" style="margin-bottom:10px">
+  <div class="ic-l">直播转化的四大心理机制</div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-top:8px">
+    <div style="background:var(--s3);border-radius:8px;padding:9px"><div style="font-size:10px;font-weight:700;color:var(--green);margin-bottom:3px">⏰ 稀缺性</div><div style="font-size:11px;color:var(--t2)">"只有100件""还剩30秒"</div></div>
+    <div style="background:var(--s3);border-radius:8px;padding:9px"><div style="font-size:10px;font-weight:700;color:var(--blue);margin-bottom:3px">👁️ 实时展示</div><div style="font-size:11px;color:var(--t2)">看到真实上身/使用效果</div></div>
+    <div style="background:var(--s3);border-radius:8px;padding:9px"><div style="font-size:10px;font-weight:700;color:var(--amber);margin-bottom:3px">💬 社交压力</div><div style="font-size:11px;color:var(--t2)">看到别人在抢，从众效应</div></div>
+    <div style="background:var(--s3);border-radius:8px;padding:9px"><div style="font-size:10px;font-weight:700;color:var(--red);margin-bottom:3px">🤝 主播信任</div><div style="font-size:11px;color:var(--t2)">粉丝对主播的信任转化为购买</div></div>
+  </div>
+</div>
+<div class="kp"><div class="kp-h">直播电商PM的核心工作</div>
+<div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>购物车产品：</strong>直播中商品管理、一键上链接、库存同步。延迟高就会让主播在"上链接"时手忙脚乱，直接损失转化。</div></div>
+<div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>互动工具：</strong>抢购倒计时、弹幕购买展示、实时销量播报。这些都是制造"稀缺感"的产品工具。</div></div>
+<div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>数据产品：</strong>主播需要实时看到转化率、在线人数趋势，才能调整话术和排品策略。延迟5分钟以上的数据对主播价值接近于零。</div></div>
+</div>
+<div class="pm-insight"><div class="pmi-label">直播不是替代货架，是补充需求发现</div><div class="pmi-text">直播创造了"用户不知道自己要什么"时的购买场景——类似逛街时被橱窗吸引。它不会取代搜索（已知需求），但极大扩展了电商的需求创造能力。PM要理解：直播的核心用户价值是<strong>"体验式发现"</strong>，而不只是打折买货。</div></div>`,
+    flashcards:[
+      {q:'直播电商和传统货架电商最本质的区别是什么？',a:'货架电商是"人找货"（已知需求）；直播电商是"货找人"（创造需求）。直播通过实时展示+稀缺制造+社交氛围，将决策时间从天压缩到分钟，本质是改变了电商的需求发现和决策链路。'},
+      {q:'主播"砍价"直播的核心转化逻辑是什么？',a:'砍价直播 = 价格锚定+稀缺性+信任背书组合。先展示原价（锚定），主播"努力砍价"到低价（稀缺+信任），限时限量（紧迫感）。用户感受到的不只是便宜，而是"通过主播获得了普通人无法获得的价格"，满足了占便宜心理和社群归属感。'},
+      {q:'直播间"在线人数"对PM的价值是什么？',a:'在线人数是直播内容质量的实时指标：①突然下降→内容出问题；②稳定增长→话题/商品有吸引力；③人数与转化率的关系→判断是否"热闹但不买"（流量质量差）。PM用这个数据优化推流策略和内容引导工具。'},
+    ],
+    quiz:[
+      {q:'某直播平台发现：观看时长长的用户，购买转化率反而不如观看时长短的用户，原因最可能是？',opts:['A. 长观看用户更挑剔','B. 长观看用户主要是为了娱乐，购买意图低；短观看用户被特定商品吸引进来，意图更强','C. 算法问题导致推流给了错误用户','D. 长观看用户设备性能差导致结算失败'],ans:'B',expl:'这是直播电商的典型现象：长观看=粉丝/娱乐用户，购买意图低；短观看=被某件商品的链接/推流吸引进来的用户，购买意图很强。PM应该优化对"商品意图用户"的精准推流而非单纯追求观看时长。'},
+      {q:'直播带货中，主播手动"上链接"（把商品加入购物车展示）的产品体验最重要的是什么？',opts:['A. 界面美观','B. 操作延迟<1秒，避免直播节奏被打断','C. 显示更多商品信息','D. 支持多商品同时显示'],ans:'B',expl:'直播节奏是生命线——主播说"上链接"后1秒内商品必须出现在用户界面，否则用户注意力已经转移，转化率会大幅下降。这个产品的核心指标是操作到展示的延迟，而不是功能丰富度。'},
+    ],
+    practice:{
+      context:'某图文种草平台（类似小红书）决定进军直播电商，你是负责这个新业务的PM。平台有3000万内容创作者，但没有直播电商基础设施。目标：6个月内实现月GMV 1亿元，核心用户为一二线18-35岁女性。',
+      questions:['问题1：从0到1搭建直播电商产品，最小可行版本（MVP）应该包含哪些核心功能？如何确定优先级？','问题2：如何说服平台头部内容创作者（10万粉丝+）从纯图文转向直播带货？设计一个创作者激励方案，包括利益分配和产品工具支持。','问题3：直播电商最大的风险是主播"跑路"（在平台外私下成交）。设计一个防跑路的产品机制，需要在不损害主播体验的前提下保护平台利益。']
+    }
+  },
+  d12:{
+    title:'内容化与私域',tag:'Day 12 · 第二周',
+    desc:'内容电商和私域流量：为什么货架模式正在被内容模式挑战？PM如何应对？',
+    theory:`
+<div style="margin-bottom:12px">
+  <div style="font-size:9px;font-weight:700;color:var(--t4);text-transform:uppercase;letter-spacing:.1em;margin-bottom:10px">三种流量模式对比</div>
+  <div style="display:flex;flex-direction:column;gap:6px">
+    <div style="background:var(--s2);border:1px solid var(--bd);border-radius:9px;padding:11px;display:grid;grid-template-columns:70px 1fr auto;gap:8px;align-items:center">
+      <div style="font-size:11px;font-weight:700;color:var(--t1)">公域流量</div>
+      <div style="font-size:11px;color:var(--t2)">平台统一分配，谁都可以获得，但成本越来越高</div>
+      <span class="score-tag tag-r">成本↑↑</span>
+    </div>
+    <div style="background:var(--s2);border:1px solid var(--bd);border-radius:9px;padding:11px;display:grid;grid-template-columns:70px 1fr auto;gap:8px;align-items:center">
+      <div style="font-size:11px;font-weight:700;color:var(--t1)">内容流量</div>
+      <div style="font-size:11px;color:var(--t2)">通过优质内容吸引用户，转化率高但需要持续投入</div>
+      <span class="score-tag tag-a">转化↑</span>
+    </div>
+    <div style="background:var(--gd);border:1px solid var(--gb);border-radius:9px;padding:11px;display:grid;grid-template-columns:70px 1fr auto;gap:8px;align-items:center">
+      <div style="font-size:11px;font-weight:700;color:var(--green)">私域流量</div>
+      <div style="font-size:11px;color:var(--t2)">沉淀在品牌私域（微信群/APP），复触达成本≈0</div>
+      <span class="score-tag tag-g">LTV最高</span>
+    </div>
+  </div>
+</div>
+<div class="kp"><div class="kp-h">内容电商 vs 货架电商的核心差异</div>
+<div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>需求创造：</strong>内容电商创造用户之前没有的购买欲望（种草）。货架电商满足用户已有的购买需求（搜索）。</div></div>
+<div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>信任来源：</strong>内容电商依赖KOL/KOC的信任背书；货架电商依赖平台信用背书（评价系统、品牌认证）。</div></div>
+<div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>决策路径：</strong>内容→兴趣→信任→购买（长链路）；搜索→比较→购买（短链路）。</div></div>
+</div>
+<div class="pm-insight"><div class="pmi-label">私域的本质是关系资产</div><div class="pmi-text">私域流量不只是一个营销渠道，而是品牌与用户之间<strong>直接关系的沉淀</strong>。当品牌能直接触达用户时，就不再受平台算法的摆布。这是为什么越来越多的品牌愿意花巨资把淘宝用户引到自己的微信群——那个群比他们在淘宝的店铺更有价值。</div></div>`,
+    flashcards:[
+      {q:'"内容电商"和"内容+电商"有什么区别？',a:'内容电商：内容是核心，购买是结果（小红书/抖音）。内容是获取注意力、建立信任的主要工具，购物是自然发生的。内容+电商：电商是核心，内容是装饰（传统货架增加测评内容）。前者的产品设计以内容体验为优先，后者以购物体验为优先。'},
+      {q:'私域用户为什么比公域用户更有价值？',a:'私域用户：①触达成本≈0（不需要购买流量）；②信任度更高（主动加入私域说明与品牌有关系）；③LTV更高（平均是公域用户的3-5倍）；④反馈更直接（可以直接对话）。本质是：私域是关系资产，不是流量资产。'},
+      {q:'PM如何帮助商家建设私域？',a:'产品工具：①"扫码入群"专属优惠（引导线上用户进私域）；②"专属客服"入口（降低私域门槛）；③"粉丝专属价"（激励用户进私域购买）；④定向消息推送（私域内精准触达）。关键是让用户感受到"进私域有明显好处"。'},
+    ],
+    quiz:[
+      {q:'某品牌在淘宝有100万粉丝，在自己的微信私域有10万用户，哪边更有价值？',opts:['A. 淘宝100万，数量大','B. 微信私域10万，因为触达成本低且关系更紧密','C. 两者价值相同','D. 取决于品类'],ans:'B',expl:'私域10万用户的价值通常高于公域100万粉丝：①私域触达成本接近于零；②私域用户主动留下联系方式，信任度更高；③私域用户LTV平均是公域的3-5倍。数量上的差距被质量差距弥补有余。'},
+      {q:'小红书上的"种草"对电商转化最重要的是什么？',opts:['A. 图片美观度','B. 达人粉丝数量','C. 内容与目标用户的相关性和真实感','D. 发布频率'],ans:'C',expl:'种草转化的核心是"目标用户认为这个内容是为自己写的"。相关性（正确品类+正确痛点）和真实感（像真实用户而非广告）是决定种草效果的两个最重要因素，远超图片美感和粉丝数量。'},
+    ],
+    practice:{
+      context:'某传统货架型电商平台（类似早期京东）发现：①平台用户平均年龄35+，年轻用户（18-25岁）获取越来越困难；②小红书/抖音上有大量关于平台品类的种草内容，但没有引导到平台购买；③商家私下把用户引到微信群，平台失去这部分流量。',
+      questions:['问题1：这个平台面临的核心问题是什么？是内容问题、用户结构问题还是流量生态问题？请做一个系统性的诊断。','问题2：如果你是这个平台的PM，设计一个"内容化改造"方案：在保留货架电商核心体验的同时，增加内容发现能力。需要说明最小可行功能集和优先级。','问题3：面对商家私域"跑流量"的问题，平台应该如何应对？是堵（禁止引流行为）还是疏（提供平台内私域工具）？请分析两种策略的利弊并给出你的建议。']
+    }
+  },
+  d13:{
+    title:'跨境电商产品',tag:'Day 13 · 第二周',
+    desc:'跨境电商与国内电商的产品差异：合规、物流、支付、本地化——哪个才是最大壁垒？',
+    theory:`
+<div style="margin-bottom:12px">
+  <div style="font-size:9px;font-weight:700;color:var(--t4);text-transform:uppercase;letter-spacing:.1em;margin-bottom:10px">跨境电商四大核心挑战</div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:7px">
+    <div style="background:var(--rd);border:1px solid rgba(226,59,74,.2);border-radius:10px;padding:12px">
+      <div style="font-size:10px;font-weight:800;color:var(--red);margin-bottom:5px">⚖️ 合规风险</div>
+      <div style="font-size:11px;color:var(--t2)">各国关税政策、商品进口限制、数据隐私法（GDPR）、知识产权保护</div>
+    </div>
+    <div style="background:var(--ad);border:1px solid rgba(236,126,0,.2);border-radius:10px;padding:12px">
+      <div style="font-size:10px;font-weight:800;color:var(--amber);margin-bottom:5px">📦 物流时效</div>
+      <div style="font-size:11px;color:var(--t2)">国际物流7-30天 vs 国内2天。海外仓可以缩短时效，但库存管理复杂度10倍增加</div>
+    </div>
+    <div style="background:var(--bld);border:1px solid var(--blb);border-radius:10px;padding:12px">
+      <div style="font-size:10px;font-weight:800;color:#8085f5;margin-bottom:5px">💳 支付本土化</div>
+      <div style="font-size:11px;color:var(--t2)">欧美：信用卡/PayPal；东南亚：货到付款；中东：习惯现金。没有本地支付方式= 70%用户流失</div>
+    </div>
+    <div style="background:var(--gd);border:1px solid var(--gb);border-radius:10px;padding:12px">
+      <div style="font-size:10px;font-weight:800;color:var(--green);margin-bottom:5px">🌐 本地化体验</div>
+      <div style="font-size:11px;color:var(--t2)">语言、货币、审美、购物习惯、节假日——每个市场都不同，复制粘贴中国模式会失败</div>
+    </div>
+  </div>
+</div>
+<div class="pm-insight"><div class="pmi-label">SHEIN的成功揭示了跨境电商的本质</div><div class="pmi-text">SHEIN不是把中国商品卖到海外，而是用中国的<strong>供应链速度+数据驱动</strong>服务全球市场。核心能力是：测款速度（7天从设计到上架）而非低价。这告诉我们跨境电商的真正壁垒不是价格，而是<strong>柔性供应链</strong>和<strong>数据选品能力</strong>。</div></div>`,
+    flashcards:[
+      {q:'跨境电商最容易被忽视但最重要的产品差异是什么？',a:'支付本地化。东南亚货到付款率超过60%，中东有大量现金偏好用户。不支持本地主流支付方式=直接放弃这部分用户。支付体验是跨境电商转化率的最大杠杆，比网站语言本地化影响更大。'},
+      {q:'海外仓模式 vs 直邮模式，PM如何选择？',a:'海外仓：物流时效短（1-5天），用户体验好，转化率高；但库存风险高，积压成本大，适合高频/标品。直邮：物流时效长（7-30天），用户接受度差；但零库存风险，适合测款/长尾品。成熟跨境平台通常用海外仓跑爆款，直邮跑长尾。'},
+      {q:'GDPR对跨境电商PM意味着什么？',a:'GDPR（欧盟数据保护条例）要求：①用户数据存储在欧洲或经用户明确授权；②用户有权要求删除全部数据；③数据泄露必须72小时内报告。违反罚款最高可达全球年营收的4%。PM在设计用户注册、购买记录、推荐系统时都需要考虑GDPR合规，否则进入欧洲市场会面临巨大法律风险。'},
+    ],
+    quiz:[
+      {q:'某中国跨境电商进入东南亚市场，发现本地用户下单率极低，最可能的首要原因是？',opts:['A. 网站语言没有本地化','B. 商品价格太高','C. 缺少货到付款选项（东南亚货到付款率60%+）','D. 物流时间太长'],ans:'C',expl:'东南亚用户（尤其是二三线城市）信用卡渗透率低，大量用户只接受货到付款。缺少这个支付方式等于直接排除了60%以上的潜在用户。这是跨境PM在进入东南亚市场时最先要解决的问题。'},
+      {q:'跨境电商的"本地化"最深层次的含义是？',opts:['A. 翻译成当地语言','B. 展示当地货币','C. 理解并匹配当地用户的购物习惯、文化审美和信任建立方式','D. 聘用当地员工'],ans:'C',expl:'语言和货币是基础，真正的本地化是产品设计层面的：印度用户重视议价感（所以需要划线价）；日本用户重视细节信息（商品描述要极其详细）；东南亚用户重视社交认证（评价数量比评分更重要）。'},
+    ],
+    practice:{
+      context:'你是Temu（拼多多旗下跨境电商）的产品PM，负责进入日本市场。日本电商市场特点：①对商品品质和细节要求极高；②物流时效要求高（习惯当天/次日达）；③信用卡支付为主；④用户对新兴电商信任度低；⑤竞争对手有Amazon Japan和乐天。',
+      questions:['问题1：在日本市场，Temu"低价快时尚"的定位面临什么挑战？你会如何调整产品定位和运营策略？','问题2：如何建立日本用户对Temu的信任？设计3个具体的产品功能，每个功能说明针对哪个信任障碍、如何解决。','问题3：日本用户对物流时效要求极高，但直邮需要7-15天。如何设计物流产品策略，在成本可控的前提下最大化用户体验？']
+    }
+  },
+  d14:{
+    title:'第二周复习 · 综合项目',tag:'Day 14 · 第二周',
+    desc:'整合第二周活动营销知识，完成一个完整的大促产品方案设计。',
+    theory:`
+<div style="margin-bottom:14px">
+  <div style="font-size:9px;font-weight:700;color:var(--t4);text-transform:uppercase;letter-spacing:.1em;margin-bottom:10px">第二周知识体系回顾</div>
+  <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:12px">
+    <div style="background:var(--s3);border:1px solid var(--bd);border-radius:9px;padding:10px;text-align:center;cursor:pointer" onclick="go('d8')">
+      <div style="font-size:14px;margin-bottom:4px">🎯</div>
+      <div style="font-size:11px;font-weight:700;color:var(--t1)">D8 大促设计</div>
+      <div style="font-size:9px;color:var(--t3);margin-top:2px">时间线·防崖·资源分配</div>
+    </div>
+    <div style="background:var(--s3);border:1px solid var(--bd);border-radius:9px;padding:10px;text-align:center;cursor:pointer" onclick="go('d9')">
+      <div style="font-size:14px;margin-bottom:4px">🎫</div>
+      <div style="font-size:11px;font-weight:700;color:var(--t1)">D9 促销工具</div>
+      <div style="font-size:9px;color:var(--t3);margin-top:2px">优惠券·满减·秒杀</div>
+    </div>
+    <div style="background:var(--s3);border:1px solid var(--bd);border-radius:9px;padding:10px;text-align:center;cursor:pointer" onclick="go('d10')">
+      <div style="font-size:14px;margin-bottom:4px">👑</div>
+      <div style="font-size:11px;font-weight:700;color:var(--t1)">D10 会员体系</div>
+      <div style="font-size:9px;color:var(--t3);margin-top:2px">分级·积分·LTV</div>
+    </div>
+    <div style="background:var(--s3);border:1px solid var(--bd);border-radius:9px;padding:10px;text-align:center;cursor:pointer" onclick="go('d11')">
+      <div style="font-size:14px;margin-bottom:4px">🔴</div>
+      <div style="font-size:11px;font-weight:700;color:var(--t1)">D11 直播电商</div>
+      <div style="font-size:9px;color:var(--t3);margin-top:2px">稀缺感·信任·工具</div>
+    </div>
+    <div style="background:var(--s3);border:1px solid var(--bd);border-radius:9px;padding:10px;text-align:center;cursor:pointer" onclick="go('d12')">
+      <div style="font-size:14px;margin-bottom:4px">📝</div>
+      <div style="font-size:11px;font-weight:700;color:var(--t1)">D12 内容私域</div>
+      <div style="font-size:9px;color:var(--t3);margin-top:2px">种草·私域·关系资产</div>
+    </div>
+    <div style="background:var(--s3);border:1px solid var(--bd);border-radius:9px;padding:10px;text-align:center;cursor:pointer" onclick="go('d13')">
+      <div style="font-size:14px;margin-bottom:4px">🌍</div>
+      <div style="font-size:11px;font-weight:700;color:var(--t1)">D13 跨境电商</div>
+      <div style="font-size:9px;color:var(--t3);margin-top:2px">合规·本地化·支付</div>
+    </div>
+  </div>
+</div>
+<div class="pm-insight"><div class="pmi-label">第二周核心认知：活动≠折扣</div><div class="pmi-text">顶级的活动营销产品，本质是在<strong>制造用户的集体记忆</strong>。双11不只是打折，它是让中国消费者每年都会参与的社会化仪式。PM要设计的不只是"促销机制"，而是"用户愿意反复参与的体验"。</div></div>`,
+    flashcards:[
+      {q:'哪种促销工具对提升用户LTV最有效？',a:'会员积分体系+个性化优惠券组合：积分建立长期关系（用户会为了保级而持续购买），个性化优惠券精准触达（ROI比通用优惠券高3-5倍）。二者结合能同时提升复购频次和客单价。'},
+      {q:'一个完整的"留存体系"应该包含哪些产品组件？',a:'①会员分级（身份激励）；②积分体系（行为激励）；③定向优惠（精准召回）；④个性化推荐（需求匹配）；⑤私域沉淀（关系维系）。单独任何一个都不完整，五者组合才是完整的留存产品矩阵。'},
+    ],
+    quiz:[
+      {q:'综合第二周内容：某平台计划用3个月将用户复购率从8%提升到15%，优先级最高的产品是？',opts:['A. 优化大促活动频率','B. 推出会员积分体系+个性化召回优惠券','C. 增加秒杀频率','D. 上线直播功能'],ans:'B',expl:'会员积分体系建立长期激励机制，个性化召回优惠券精准触达沉睡用户，两者组合是直接提升复购率ROI最高的产品投资。大促和直播对复购率的影响是间接的，效果也更不确定。'},
+    ],
+    practice:{
+      context:'综合项目：你是某中型综合电商的活动营销PM。平台当前状况：月GMV 2亿，月活用户50万，会员体系缺失，主要靠大促驱动GMV，大促结束后GMV回落严重（峰谷比5:1）。老板要求：3个月内将GMV峰谷比降至2:1，同时提升月活用户质量（ARPU提升30%）。',
+      questions:['问题1：大促依赖型的GMV结构有哪些深层问题？请分析"峰谷比5:1"背后反映的用户结构和商家结构问题。','问题2：设计一个完整的"用户留存产品矩阵"：包含会员体系、促销工具、私域沉淀三个层次，每个层次的产品形态、目标用户群和预期效果指标。','问题3：在改造过程中，如何避免从"大促依赖"变成"优惠券依赖"？设计一套指标监控体系，用数据预警"新的不健康依赖"的出现。']
+    }
+  },
+
+  d15:{title:'需求优先级框架',tag:'Day 15 · 第三周',desc:'RICE、ICE、MoSCoW——哪个框架最适合电商PM？如何在资源有限时做出最优决策。',
+    theory:`<div class="info-card" style="margin-bottom:12px"><div class="ic-l">三大优先级框架对比</div><div style="margin-top:10px;display:flex;flex-direction:column;gap:7px"><div style="background:var(--s3);border-radius:9px;padding:11px"><div style="font-size:11px;font-weight:700;color:var(--t1);margin-bottom:4px">RICE = Reach × Impact × Confidence ÷ Effort</div><div style="font-size:11px;color:var(--t2)">适合：有数据基础、多方案横向比较。优点：量化清晰。缺点：主观性依然很强（Impact怎么打分？）</div></div><div style="background:var(--gd);border:1px solid var(--gb);border-radius:9px;padding:11px"><div style="font-size:11px;font-weight:700;color:var(--green);margin-bottom:4px">ICE = Impact × Confidence × Ease</div><div style="font-size:11px;color:var(--t2)">适合：快速评估，早期阶段。轻量但精度低。适合需要快速排序10+个需求的场景。</div></div><div style="background:var(--bld);border:1px solid var(--blb);border-radius:9px;padding:11px"><div style="font-size:11px;font-weight:700;color:#8085f5;margin-bottom:4px">MoSCoW = Must/Should/Could/Won't</div><div style="font-size:11px;color:var(--t2)">适合：版本规划，让团队快速对齐。优点：沟通简单。缺点：没有量化，容易所有人都说"Must Have"。</div></div></div></div><div class="pm-insight"><div class="pmi-label">框架是工具，不是答案</div><div class="pmi-text">所有优先级框架的本质是让主观判断更有结构地表达出来，而不是消除主观性。真正好的优先级决策需要：清晰的目标（这个季度最重要的是什么）+ 框架（结构化评估）+ 数据（验证假设）+ 对话（与业务/技术对齐）。</div></div>`,
+    flashcards:[{q:'RICE评分中，Confidence（置信度）为什么最重要？',a:'Confidence是对整个评估的校正系数。一个Impact 10分但Confidence只有20%的需求，RICE分和Impact 7分Confidence 80%的需求相差悬殊。Confidence低意味着假设未经验证，风险高——而很多PM忽略这一点，导致优先级失真。'},{q:'如何区分"紧急"和"重要"的需求？',a:'重要：对核心目标（北极星指标）有显著影响。紧急：有时间窗口限制。矩阵：①重要+紧急=立即做；②重要+不紧急=规划做；③不重要+紧急=委派或评估；④不重要+不紧急=不做。电商PM最大的陷阱是把"老板今天提到的"当成"重要"。'}],
+    quiz:[{q:'用RICE框架评估时，以下哪种情况最值得优先做？',opts:['A. Reach大、Impact高、Confidence低、Effort高','B. Reach中、Impact中、Confidence高、Effort低','C. Reach小、Impact极高、Confidence低、Effort低','D. Reach大、Impact低、Confidence高、Effort极高'],ans:'B',expl:'B选项：中等收益但置信度高、实现简单，RICE分高且风险低。C看起来Impact极高但置信度低+Reach小，实际分并不高。A和D的Effort太高，拉低了最终评分。不确定性高的高收益方案，应该先做小实验验证再全力投入。'},{q:'某需求被所有相关方都标记为"Must Have"，最可能的原因是？',opts:['A. 这个需求真的很重要','B. MoSCoW框架被滥用，大家没有理解"Must Have"的严格定义','C. 团队对齐做得很好','D. 产品策略非常清晰'],ans:'B',expl:'"Must Have"的严格定义是：没有这个功能，产品就无法发布/上线/使用。但实际使用中大家都倾向于把自己负责的需求标为Must Have。解决方案：重新定义标准——"如果不做这个，会导致什么具体的业务后果？"'}],
+    practice:{context:'你是某中型电商App的PM，现在手头有以下需求积压：①优化搜索结果排序算法（技术复杂，预期转化率+5%）；②新增"价格历史曲线"功能（用户强烈呼声）；③修复iOS结算页闪退bug（影响1%用户，但这1%多为高价值用户）；④上线"AR试穿"功能（行业趋势，效果未验证）；⑤优化首页加载速度（慢3秒，影响全部用户）。',questions:['问题1：用RICE框架对这5个需求进行评分和排序（需要设定评分标准并逐一打分），并给出你的优先级排序结果。','问题2：如果本季度开发资源只够做2个需求，你会选哪2个？请说明你的决策逻辑，以及如何向被砍掉需求的业务方解释。','问题3："AR试穿"功能行业趋势明显但效果未验证，如何设计一个低成本的验证方案，在不占用大量开发资源的前提下验证核心假设？']},
+  },
+  d16:{title:'产品Roadmap设计',tag:'Day 16 · 第三周',desc:'如何把战略目标转化成可执行的产品路线图？避免Roadmap变成"功能许愿清单"。',
+    theory:`<div class="kp"><div class="kp-h">好Roadmap的三个特征</div><div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>目标驱动：</strong>每个功能都能回答"这对我们这个季度的目标有什么贡献"，而不是"因为用户要求"或"竞品有"。</div></div><div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>有取舍：</strong>好的Roadmap明确说"这个季度不做什么"，比说"做什么"更难但更重要。列入Roadmap=承诺资源，不能什么都要。</div></div><div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>可交付：</strong>每个里程碑有明确的完成标准（Definition of Done），不是"功能上线"而是"指标达到X"。</div></div></div><div class="info-card" style="margin-top:12px"><div class="ic-l">Roadmap时间维度设计</div><div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;margin-top:8px"><span class="flow-node" style="background:var(--rd);border-color:rgba(226,59,74,.3);color:var(--red)">0-4周 执行中</span><span class="flow-arrow">→</span><span class="flow-node" style="background:var(--ad);border-color:rgba(236,126,0,.3);color:var(--amber)">1-3月 规划中</span><span class="flow-arrow">→</span><span class="flow-node" style="background:var(--bld);border-color:var(--blb);color:#8085f5">3-6月 方向性</span><span class="flow-arrow">→</span><span class="flow-node">6月+ 愿景</span></div></div><div class="pm-insight" style="margin-top:10px"><div class="pmi-label">Roadmap是沟通工具，不只是执行计划</div><div class="pmi-text">优秀PM用Roadmap做三件事：①向上管理（让老板理解为什么这个季度做这些）；②向下对齐（让工程师/设计师理解为什么要做，而不是只知道做什么）；③横向协调（让销售/运营知道哪些功能什么时候能用）。一个好Roadmap节省的会议时间比你花在上面的时间多10倍。</div></div>`,
+    flashcards:[{q:'如何避免Roadmap变成"功能许愿清单"？',a:'三个方法：①每个需求必须绑定一个季度目标（OKR/KPI），没有绑定不进Roadmap；②明确"不做什么"（反Roadmap），让取舍可见；③设定Roadmap review节奏（每4-6周），根据数据和优先级变化调整，而不是把6个月的计划写死。'},{q:'如何处理业务方临时插入的"紧急需求"？',a:'标准流程：①评估真实影响（量化，不能只说"很重要"）；②和现有规划对比优先级（做这个要推什么？）；③给出3个选项：插入（代价是X）、下一版本、不做；④让业务方做选择，而不是PM单独决定。这样既显示了专业性，也把决策责任还给了业务方。'}],
+    quiz:[{q:'某PM把接下来12个月所有功能都详细规划好并锁定，这样做的最大风险是？',opts:['A. 工作量太大','B. 锁定12个月计划会让团队失去根据市场变化调整的能力，且大量假设会被证伪','C. 不能快速响应竞品动作','D. 会让用户对功能发布有太高期待'],ans:'B',expl:'12个月前的假设，到第3个月往往已经有50%以上被证伪。锁定计划会产生"沉没成本"心理，让团队不敢调整。好的Roadmap是近期详细（1-2个月），远期方向性（3-6个月），6个月以后只有愿景而没有功能清单。'},{q:'Roadmap中"方向性承诺"和"功能承诺"的区别是什么？',opts:['A. 前者模糊后者清晰','B. 前者承诺解决的问题，后者承诺具体功能——PM应该优先做前者','C. 前者针对用户后者针对内部','D. 没有实质区别'],ans:'B',expl:'功能承诺（"我们会做购物车分享功能"）会让团队过早锁定方案，而问题可能有更好的解法。方向性承诺（"我们会提升商品发现效率"）给团队留下探索空间，也更能适应信息变化。近期可以有功能承诺，远期只做方向性承诺。'}],
+    practice:{context:'你刚加入某中型电商公司担任产品负责人。当前状况：没有统一的Roadmap，各业务线各自为政，开发资源经常争抢；公司今年OKR是"将用户复购率从10%提升到18%"；现在有来自不同部门的12个需求等待排期，其中至少有5个声称"非常紧急"。',questions:['问题1：如何建立一个新的Roadmap管理流程？从收集需求→评估优先级→排期→发布→复盘，设计完整的工作流程。','问题2：针对"复购率从10%到18%"这个OKR，梳理出3-5个可能的功能方向，并说明每个方向的逻辑链路（功能→用户行为变化→指标变化）。','问题3：如何处理各业务线之间的Roadmap冲突？设计一个"需求仲裁机制"，在保证决策效率的同时，让各方感觉被公平对待。']},
+  },
+  d17:{title:'北极星指标体系',tag:'Day 17 · 第三周',desc:'为什么一个指标能改变整个团队的行为？如何为你的产品找到正确的北极星指标。',
+    theory:`<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px"><div style="background:var(--bld);border:1px solid var(--blb);border-radius:11px;padding:14px"><div style="font-size:10px;font-weight:800;color:#8085f5;margin-bottom:8px">❌ 错误的北极星指标</div><div style="font-size:12px;color:var(--t2);line-height:1.8">DAU、注册用户数、页面浏览量<br>→ 这些是<strong style="color:var(--t1)">虚荣指标</strong>，可以轻易增大但不代表真实价值</div></div><div style="background:var(--gd);border:1px solid var(--gb);border-radius:11px;padding:14px"><div style="font-size:10px;font-weight:800;color:var(--green);margin-bottom:8px">✓ 正确的北极星指标</div><div style="font-size:12px;color:var(--t2);line-height:1.8">月复购订单数、有效访客GMV、活跃商家数<br>→ 反映<strong style="color:var(--t1)">真实用户价值获取</strong></div></div></div><div class="kp"><div class="kp-h">北极星指标的选择标准</div><div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>代表核心价值：</strong>指标增长说明用户获得了他们来平台的核心价值（买到了想要的商品）。</div></div><div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>可分解：</strong>能拆解成团队可以行动的二级指标（北极星 = 流量×转化×质量）。</div></div><div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>不可博弈：</strong>不能靠刷数据、短期活动来虚假增大，团队必须通过真实改进来提升它。</div></div></div><div class="pm-insight"><div class="pmi-label">不同平台的北极星指标差异巨大</div><div class="pmi-text">淘宝：成交买家数（确保双边市场健康）。京东：准时妥投率（体现自营物流核心价值主张）。拼多多：人均购买次数（强化复购是低价之外的增长引擎）。不同的北极星指标会导致产品决策的巨大差异——这就是为什么理解竞品北极星指标比分析功能更重要。</div></div>`,
+    flashcards:[{q:'什么是"虚荣指标"？为什么DAU有时也是虚荣指标？',a:'虚荣指标：好看但不代表真实价值的数字。DAU是虚荣指标的情况：如果日活用户进来只是看了看就离开，没有完成任何有价值的行为，DAU再高也没意义。活跃的定义很关键——"打开App"算活跃还是"完成一次有效浏览"算活跃？'}],
+    quiz:[{q:'某电商平台选择"GMV"作为北极星指标，最大的问题是？',opts:['A. GMV太难统计','B. GMV可以通过大量低质量促销活动虚假增大，不代表平台真实健康度','C. GMV不能被分解','D. GMV增长太慢'],ans:'B',expl:'GMV可以用"促销+刷单"轻易虚假拉升，但用户体验和商家质量可能在同步恶化。更好的北极星指标是"复购GMV"或"活跃买家数"——这些指标反映了用户真实对平台的认可，而不容易被短期行为博弈。'}],
+    practice:{context:'你是某母婴电商平台的首席产品官。平台团队对北极星指标争论不休：销售团队希望用GMV，运营团队希望用DAU，技术团队希望用留存率，老板希望用利润。',questions:['问题1：分析这四个候选指标各自的优缺点，以及"以这个指标为导向会导致什么团队行为"。','问题2：设计一个适合母婴电商平台的北极星指标，并说明你的选择理由和验证方法。','问题3：如何向不同部门的反对者解释为什么你选的指标更好？设计一套针对不同反对意见的回应策略。']},
+  },
+  d18:{title:'A/B测试方法论',tag:'Day 18 · 第三周',
+    desc:'如何科学地验证你的产品假设？从实验设计到结果解读，掌握A/B测试的完整方法论。',
+    theory:`
+<div style="margin-bottom:14px">
+  <div style="font-size:9px;font-weight:700;color:var(--t4);text-transform:uppercase;letter-spacing:.1em;margin-bottom:10px">A/B测试完整流程</div>
+  <div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;margin-bottom:14px">
+    <span class="flow-node" style="background:var(--bld);border-color:var(--blb);color:#8085f5">明确假设</span><span class="flow-arrow">→</span>
+    <span class="flow-node">确定指标</span><span class="flow-arrow">→</span>
+    <span class="flow-node">计算样本量</span><span class="flow-arrow">→</span>
+    <span class="flow-node">设计分流</span><span class="flow-arrow">→</span>
+    <span class="flow-node">运行实验</span><span class="flow-arrow">→</span>
+    <span class="flow-node" style="background:var(--gd);border-color:var(--gb);color:var(--green)">分析决策</span>
+  </div>
+</div>
+
+<div class="kp"><div class="kp-h">第一步：如何正确分组（流量分流）</div>
+<div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>用户维度分流（推荐）：</strong>以User ID作为分流依据，哈希取模分配到实验组/对照组。同一个用户在整个实验期间始终看到同一个版本，避免体验不一致造成的数据污染。</div></div>
+<div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>会话维度分流（慎用）：</strong>以Session为单位随机分流。同一用户不同次访问可能看到不同版本，会产生"用户内污染"——用户看到A版后去看B版，行为会互相影响。</div></div>
+<div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>分层随机（高阶）：</strong>按地区、设备、用户价值分层后再随机，确保实验组与对照组在关键维度上分布均匀，避免实验组恰好分到更多高价值用户导致结果偏高。</div></div>
+<div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>互斥实验（并发处理）：</strong>多个实验同时进行时，必须确保同一用户不会同时进入多个测试不同位置的实验，否则实验之间会互相干扰，结果无法归因。</div></div>
+</div>
+
+<div class="kp" style="margin-top:10px"><div class="kp-h">第二步：最小样本量计算</div>
+<div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>核心公式：</strong>n = 16 × p×(1-p) / (Δ²)，其中p是基准转化率，Δ是期望检测到的最小绝对变化量。置信水平95%（α=0.05），统计功效80%（β=0.2）。</div></div>
+<div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>实际估算规律：</strong>基准转化率5%，希望检测到+1个百分点（相对提升20%），需要约5,000人/组；只想检测+0.5个百分点，则需要约20,000人/组。绝对变化越小，所需样本量越大（平方关系）。</div></div>
+<div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>测试时长下限：</strong>即使样本量够了，也要至少运行2个完整业务周期（通常2周），以消除工作日/周末的周期性效应和新奇效应。</div></div>
+</div>
+
+<div class="kp" style="margin-top:10px"><div class="kp-h">第三步：如何判断实验结果是否可信</div>
+<div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>p值 &lt; 0.05：</strong>在零假设成立的前提下，观察到当前结果（或更极端结果）的概率小于5%。通俗理解：如果A和B实际没差别，看到这么大差异的概率只有5%，因此有理由相信A和B确实不同。</div></div>
+<div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>置信区间：</strong>比p值更有价值——区间告诉你效果的"大小范围"。例如"提升3%，95%置信区间[1.2%, 4.8%]"，说明即使考虑误差，效果下限仍有1.2%，可以放心发布。若区间包含0（如[-0.5%, 3.5%]），说明效果不确定，不应发布。</div></div>
+<div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>SRM检查（样本比率失真）：</strong>实验结束后，先检查实验组与对照组的样本比例是否符合设计（如1:1）。如果实际比例偏差超过5%（如52:48），说明分流逻辑有bug，实验结果不可信，必须重做。</div></div>
+<div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>分层分析验证：</strong>对总体结果显著的实验，需要分新老用户、分设备、分地区验证是否一致。若某个子群体结果方向相反，说明存在"辛普森悖论"，总体结论不可直接采用。</div></div>
+</div>
+
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px">
+  <div style="background:var(--rd);border:1px solid rgba(226,59,74,.2);border-radius:10px;padding:12px">
+    <div style="font-size:9px;font-weight:800;color:var(--red);text-transform:uppercase;margin-bottom:8px">五大陷阱</div>
+    <div style="font-size:11px;color:var(--t2);line-height:1.9">① 早停：看到领先就停止<br>② 新奇效应：测试期太短<br>③ 样本量不足：结论是假的<br>④ 指标选错：虚荣指标提升<br>⑤ 用户污染：实验组互相影响</div>
+  </div>
+  <div style="background:var(--gd);border:1px solid var(--gb);border-radius:10px;padding:12px">
+    <div style="font-size:9px;font-weight:800;color:var(--green);text-transform:uppercase;margin-bottom:8px">最佳实践</div>
+    <div style="font-size:11px;color:var(--t2);line-height:1.9">✓ 预注册假设再开始<br>✓ 运行至少2个业务周期<br>✓ 先做SRM检查再看结果<br>✓ 看置信区间不只看p值<br>✓ 分层分析验证一致性</div>
+  </div>
+</div>
+
+<div class="pm-insight" style="margin-top:12px"><div class="pmi-label">A/B测试的本质是降低决策风险</div><div class="pmi-text">A/B测试不是为了"证明我的方案对"，而是在全量发布前用小流量验证假设，把潜在损失控制在可控范围内。一个好的PM习惯是：每一个产品决策都问"这个假设如何用数据验证"，而不是依赖直觉或权威。</div></div>
+`,
+    flashcards:[
+      {q:'A/B测试中为什么要以User ID而不是Session作为分流单位？',a:'Session分流会导致同一用户在不同次访问中看到不同版本（A/B都看过），用户的行为会互相影响，造成"用户内污染"。User ID分流保证每个用户整个实验期间只看一个版本，行为数据干净可归因。'},
+      {q:'最小样本量公式的核心变量是什么？绝对提升量减半，样本量如何变化？',a:'核心公式：n = 16×p×(1-p)/Δ²，Δ是期望检测到的最小绝对变化。Δ减半（如+1%变+0.5%），样本量变为原来的4倍（平方关系）。这就是为什么检测"微小提升"需要极大样本量。'},
+      {q:'什么是SRM（样本比率失真），发现SRM该怎么办？',a:'SRM：实验结束后实验组/对照组的实际样本比例与设计比例偏差超过5%（如设计1:1但实际是52:48）。说明分流逻辑有bug，数据已污染，实验结果不可信。必须停止分析、排查分流代码并重做实验，不能在SRM数据上得出任何结论。'},
+      {q:'p<0.05且实验结果显著，一定要发布吗？',a:'不一定。还需检查：①置信区间是否包含0（如[-0.5%,+3.5%]包含0说明方向不确定）；②效果大小是否有业务意义（统计显著≠业务价值足够）；③分层分析是否一致（某子群体方向相反则有辛普森悖论风险）；④是否存在负面副作用（主指标↑但其他重要指标↓）。'},
+      {q:'什么是辛普森悖论？在A/B测试中如何识别？',a:'总体实验组优于对照组，但分层看某些子群体（如iOS用户）结果方向相反。原因是子群体在实验组/对照组中的比例不均等。识别方法：分层分析（新老用户、设备、地区），如果子群体结论与总体矛盾，总体结论不可直接采用，需先修复分层不均问题。'},
+    ],
+    quiz:[
+      {q:'某实验设计：基准转化率2%，期望检测到+0.4个百分点（即2%→2.4%）。每组需要约多少样本？',opts:['A. 约1,000人/组','B. 约5,000人/组','C. 约20,000人/组','D. 约100,000人/组'],ans:'C',expl:'用估算公式：n≈16×0.02×0.98/(0.004)²≈16×0.0196/0.000016≈19,600人/组。接近C选项。绝对变化0.4个百分点时需要约2万人/组，这是大多数PM严重低估的数字。如果每天只有5000个UV，需要8+天才能收集到足够样本。'},
+      {q:'实验结束后发现：实验组(10432人) vs 对照组(9568人)，设计是1:1分流。你的第一个动作是？',opts:['A. 直接看转化率差异，算p值','B. 立即停止分析，这是SRM，分流有bug，实验数据不可信','C. 实验组样本多说明效果好，直接发布','D. 把实验组抽样调整成和对照组一样多再分析'],ans:'B',expl:'实际比例52:48，设计是50:50，偏差超过5%，这是典型的SRM（样本比率失真）。说明分流逻辑有bug——某些用户被系统性地分到了实验组（可能是新用户比例不同），数据已污染。任何在此数据上得出的结论都不可信，必须先排查分流代码再重做实验。'},
+      {q:'实验结果：实验组转化率3.2%，对照组2.8%，p=0.03，95%置信区间[-0.1%, +0.8%]。你的决策是？',opts:['A. p<0.05显著，发布实验组方案','B. 置信区间包含0，结果不确定，不能发布','C. 提升明显应该发布','D. 再跑一周看看'],ans:'B',expl:'置信区间[-0.1%, +0.8%]包含0，说明真实效果可能是负的（-0.1%）也可能是正的（+0.8%）——我们无法确定方向。尽管p=0.03在阈值以下，但置信区间是更直接的判断标准。这种情况通常说明样本量不够，效果区间太宽。正确做法：增大样本量继续跑，而不是现在做决策。'},
+      {q:'某实验运行3天后，实验组CTR比对照组高12%，你的PM同事建议立刻停止并发布。你的回应是？',opts:['A. 同意，12%提升很显著应该快点发布','B. 拒绝。3天太短，可能是新奇效应，且样本量可能不足，必须跑完预设周期','C. 再等一天确认','D. 问工程师这12%可靠吗'],ans:'B',expl:'早停是A/B测试最常见的错误。原因：①3天覆盖不了一个完整业务周期（周末和工作日行为差异大）；②新奇效应——用户看到新版本因为好奇而点击，1-2周后会恢复正常；③统计波动——前期样本少，随机波动大，看起来"领先"可能只是噪音。必须在实验开始前设定好停止条件，中途不能随意修改。'},
+      {q:'对新购物车页面做A/B测试，选哪个指标最合适作为主指标？',opts:['A. 购物车页面的PV（页面浏览量）','B. 购物车按钮的点击率（加购率）','C. 最终支付成功订单数（转化率×UV）','D. 用户在购物车页面的停留时长'],ans:'C',expl:'购物车的核心目标是促成下单，所以主指标必须是最终的转化结果——支付成功订单数。PV和停留时长是虚荣指标（高了不代表卖出去东西）；加购率是中间漏斗指标（加购≠下单）。选错主指标可能导致：加购率↑但实际下单率↓，结果仍然错误发布方案。'},
+    ],
+    practice:{
+      context:'你负责某电商App商品详情页的A/B测试项目。计划测试：新设计将"立即购买"按钮从页面底部移到主图下方，假设能提升购买转化率。已知数据：日均访问商品详情页UV 80,000，当前购买转化率3.5%，目标检测到+0.5个百分点（即3.5%→4.0%）的提升。置信水平95%，统计功效80%。',
+      questions:[
+        '问题1：设计这个A/B实验的完整方案。需要包含：①如何设置分流（以什么维度、怎么分组）；②每组最少需要多少样本量（请用估算公式计算，给出计算过程）；③预计实验需要运行多少天；④主指标和副指标各选什么，理由是什么。',
+        '问题2：实验运行14天后，你看到了以下数据：实验组43,126人转化率3.9%，对照组43,874人转化率3.5%，p=0.02，95%置信区间[+0.1%, +0.8%]，SRM检查比例51.7:48.3。请判断：这个实验结果是否可信？能否发布新设计？如果有问题，问题出在哪里，下一步怎么做？',
+        '问题3：假设上一题的SRM问题修复后重新实验，结果显示总体购买转化率+0.4%（显著），但分层分析发现：新用户转化率提升+1.2%（显著），老用户转化率下降-0.3%（不显著）。你会如何决策？这种情况揭示了什么产品洞察？下一步如何迭代实验？'
+      ]
+    }
+  },
+d19:{title:'竞品分析框架',tag:'Day 19 · 第三周',desc:'不是比功能，是理解战略。掌握真正有价值的竞品分析方法，避免陷入"功能抄袭"陷阱。',
+    theory:`<div class="kp"><div class="kp-h">竞品分析的三个层次</div><div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>功能层（表象）：</strong>竞品有什么功能，你没有。大多数竞品分析只做到这一层，但这是最没价值的。抄功能≠抄到竞争力，功能背后的战略和执行才是核心。</div></div><div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>体验层（中层）：</strong>竞品的用户体验设计，交互逻辑，用户路径。这一层能发现竞品的真实产品能力和执行水准。</div></div><div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>战略层（深层）：</strong>竞品的目标用户、商业模式、核心价值主张、护城河建设方向。这一层能预测竞品未来的产品走向。</div></div></div><div class="pm-insight" style="margin-top:10px"><div class="pmi-label">最有价值的竞品分析问题</div><div class="pmi-text">不要问"竞品有什么功能"，要问：①竞品在解决用户的哪个核心问题（而不是我们的）？②竞品的产品决策背后有什么战略逻辑？③竞品的护城河是什么，它在用什么来维持竞争优势？④如果我是竞品的PM，接下来6个月我会做什么？</div></div>`,
+    flashcards:[{q:'为什么说"功能对标竞品"是错误的竞品分析方式？',a:'功能对标只是在追赶，不是在超越。原因：①竞品功能是服务于它的战略目标，照抄功能不一定匹配你的战略；②功能上线即落后（你做完他已经迭代了）；③用户选择你而不是竞品的理由，往往不是因为功能更多，而是核心价值主张更匹配。'}],
+    quiz:[{q:'分析竞品时发现对方新上线了"AR试衣间"功能，最正确的应对方式是？',opts:['A. 立即列入Roadmap做相同功能','B. 分析这个功能背后的战略意图，用户问题是什么，以及是否符合自己的战略','C. 忽略，专注自己的路线','D. 召开紧急会议决定是否跟进'],ans:'B',expl:'先分析战略意图：竞品做AR试衣间是在解决"线上不能试穿导致退货率高"的问题，还是在建立"技术壁垒"，还是在"吸引年轻用户"？不同的战略意图对你是否跟进的决策影响很大。不加思考地跟进可能会分散资源，偏离你自己的核心战略。'}],
+    practice:{context:'你是某中型服装电商PM，主要竞争对手是：ZARA官方app（快时尚品牌自营）、唯品会（品牌折扣）、小红书（内容种草+购物）。本季度需要向董事会提交一份竞品分析报告，以支撑你的Roadmap决策。',questions:['问题1：对这三个竞品进行战略层面的分析——每个竞品的目标用户是谁？核心价值主张是什么？护城河在哪里？','问题2：基于竞品分析，找出你的平台的差异化机会（竞品没有充分满足的用户需求），并说明你的判断依据。','问题3：如何建立一套持续的竞品监测机制，让团队能及时感知竞品的重大变化？设计具体的监测方法和信息分发流程。']},
+  },
+  d20:{title:'用户调研方法',tag:'Day 20 · 第三周',desc:'用户说的和用户做的往往不同。掌握真正有效的用户调研方法，避免被"用户意见"误导。',
+    theory:`<div style="margin-bottom:12px"><div style="font-size:9px;font-weight:700;color:var(--t4);text-transform:uppercase;letter-spacing:.1em;margin-bottom:10px">定性 vs 定量调研</div><div style="display:grid;grid-template-columns:1fr 1fr;gap:8px"><div style="background:var(--bld);border:1px solid var(--blb);border-radius:10px;padding:12px"><div style="font-size:10px;font-weight:800;color:#8085f5;margin-bottom:6px">定性调研（探索型）</div><div style="font-size:11px;color:var(--t2);line-height:1.7">深度访谈、用户观察、可用性测试<br>回答：<strong style="color:var(--t1)">为什么</strong>用户这样做<br>样本量：5-20人</div></div><div style="background:var(--gd);border:1px solid var(--gb);border-radius:10px;padding:12px"><div style="font-size:10px;font-weight:800;color:var(--green);margin-bottom:6px">定量调研（验证型）</div><div style="font-size:11px;color:var(--t2);line-height:1.7">问卷调查、埋点数据、A/B测试<br>回答：<strong style="color:var(--t1)">有多少</strong>用户这样做<br>样本量：1000+</div></div></div></div><div class="kp"><div class="kp-h">用户访谈的黄金法则</div><div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>不要问"你会用X功能吗"：</strong>用户总是说"会"，但实际行为完全不同。要问过去发生的具体事件："上一次你想买X时，你是怎么做的？"</div></div><div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>不要问"你想要什么"：</strong>用户给你功能列表，不是用户洞察。要问"现在最难做的事情是什么"，再从中提炼产品机会。</div></div><div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>5-Why法：</strong>用户说"结算太麻烦"→Why？"找不到优惠券"→Why？"券放在设置里"→Why？"设计师觉得不应该放首页"→找到了真正的问题。</div></div></div>`,
+    flashcards:[{q:'为什么用户说"很好用"，PM却不应该满意？',a:'用户表达满意有多种原因：①礼貌性回答；②不知道有更好的替代方案；③对现状已经习以为常（适应性）。真正有价值的调研应该探索：用户在哪些场景下放弃了使用？用户完成任务的最大阻碍是什么？这些问题比"好不好用"更能揭示产品问题。'}],
+    quiz:[{q:'以下哪个调研问题最能帮助PM理解用户的真实痛点？',opts:['A. 你对现有功能满意吗（1-5分）','B. 你希望我们增加什么新功能','C. 请描述你上次想完成XX任务时，最让你沮丧的一步是什么','D. 你多久使用一次我们的产品'],ans:'C',expl:'C问题聚焦在具体的过去事件和情绪（沮丧=负面体验），能挖掘出真实的痛点场景。A是评分（没有细节）；B让用户做PM的工作（他们给的通常是症状而非根因）；D只有频率数据（没有质量信息）。'}],
+    practice:{context:'你即将对"购物车放弃率高达65%"这一问题做用户调研，需要在1周内完成并给出改进方案。资源有限：可以组织5次深度访谈（60分钟/次），可以发出一份问卷（预计200份回收），可以使用平台埋点数据。',questions:['问题1：设计5次深度访谈的提纲，包括核心问题列表（至少8个问题），并说明每个问题的设计意图和期望挖掘的信息。','问题2：设计一份购物车放弃行为的问卷，选择5个最关键的问题，并说明你为什么选这5个而不是其他问题。','问题3：如何将访谈结论（定性）、问卷数据（定量）和埋点行为数据（行为）三类数据结合起来形成一个统一的洞察？设计你的分析框架。']},
+  },
+  d21:{title:'第三周复习 · 综合项目',tag:'Day 21 · 第三周',desc:'整合第三周产品视野知识，完成完整的产品战略分析与决策。',
+    theory:`<div style="margin-bottom:14px"><div style="font-size:9px;font-weight:700;color:var(--t4);text-transform:uppercase;letter-spacing:.1em;margin-bottom:10px">第三周知识体系回顾</div><div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px"><div style="background:var(--s3);border:1px solid var(--bd);border-radius:9px;padding:10px;text-align:center"><div style="font-size:14px;margin-bottom:4px">⚖️</div><div style="font-size:11px;font-weight:700;color:var(--t1)">D15 需求优先级</div><div style="font-size:9px;color:var(--t3);margin-top:2px">RICE·ICE·MoSCoW</div></div><div style="background:var(--s3);border:1px solid var(--bd);border-radius:9px;padding:10px;text-align:center"><div style="font-size:14px;margin-bottom:4px">🗺️</div><div style="font-size:11px;font-weight:700;color:var(--t1)">D16 Roadmap</div><div style="font-size:9px;color:var(--t3);margin-top:2px">目标驱动·有取舍</div></div><div style="background:var(--s3);border:1px solid var(--bd);border-radius:9px;padding:10px;text-align:center"><div style="font-size:14px;margin-bottom:4px">⭐</div><div style="font-size:11px;font-weight:700;color:var(--t1)">D17 北极星指标</div><div style="font-size:9px;color:var(--t3);margin-top:2px">真实价值·不可博弈</div></div><div style="background:var(--s3);border:1px solid var(--bd);border-radius:9px;padding:10px;text-align:center"><div style="font-size:14px;margin-bottom:4px">🧪</div><div style="font-size:11px;font-weight:700;color:var(--t1)">D18 A/B测试</div><div style="font-size:9px;color:var(--t3);margin-top:2px">科学验证·避免陷阱</div></div><div style="background:var(--s3);border:1px solid var(--bd);border-radius:9px;padding:10px;text-align:center"><div style="font-size:14px;margin-bottom:4px">🔭</div><div style="font-size:11px;font-weight:700;color:var(--t1)">D19 竞品分析</div><div style="font-size:9px;color:var(--t3);margin-top:2px">战略层·不只是功能</div></div><div style="background:var(--s3);border:1px solid var(--bd);border-radius:9px;padding:10px;text-align:center"><div style="font-size:14px;margin-bottom:4px">👥</div><div style="font-size:11px;font-weight:700;color:var(--t1)">D20 用户调研</div><div style="font-size:9px;color:var(--t3);margin-top:2px">定性+定量·5-Why法</div></div></div></div><div class="pm-insight"><div class="pmi-label">第三周核心升级：从执行者到决策者</div><div class="pmi-text">第一、二周训练的是"如何理解和改进产品"，第三周训练的是"如何做正确的产品决策"。最大的认知升级是：<strong>好的决策不是找到最好的方案，而是在不确定的信息下做出最合理的取舍，并能清晰地向所有人解释为什么。</strong></div></div>`,
+    flashcards:[{q:'从第三周的学习中，哪一个框架/方法论最能改变PM的日常工作方式？',a:'A/B测试思维：不是"我认为这个方案好"，而是"我假设这个方案会提升X指标Y%，我们来验证"。把每一个产品决策变成一个可验证的假设，是从资历型PM到数据驱动PM最核心的转变。'}],
+    quiz:[{q:'综合三周的学习：一个优秀的电商PM最核心的能力组合是？',opts:['A. 懂技术+会画原型+能写PRD','B. 用户洞察+数据分析+跨团队推动+战略思考','C. 熟悉竞品+能做大促活动','D. 会用各种产品工具和框架'],ans:'B',expl:'B描述的是PM的四大核心能力：理解用户（洞察）+理解数据（分析）+实现产品（推动）+理解方向（战略）。技术/画图/写文档是手段，这四个能力才是真正的竞争力。'}],
+    practice:{context:'综合项目：你被任命为某新兴生鲜电商的产品负责人。平台现状：月GMV 8000万，月活50万，复购率12%，NPS 35（偏低）。主要问题：用户投诉"配送时间不准确"和"商品与描述不符"，导致大量一次性用户。你有6个月时间，核心目标：NPS提升到55，复购率提升到20%。',questions:['问题1：用你在第三周学到的所有工具（北极星指标选择、RICE优先级、A/B测试、竞品分析、用户调研），设计一个完整的6个月产品规划。','问题2：如何用数据验证你的规划是否走在正确的方向上？设计一套"早期预警"指标体系，让你在3个月时就能判断6个月目标能否实现。','问题3：如何组织你的团队（假设你有5个PM）分工协作，最大化这6个月的产出？设计团队分工方案和协作机制。']},
+  },
+  d22:{title:'完整PRD写作',tag:'Day 22 · 第四周',desc:'PRD不是产品说明书，是推动产品落地的沟通工具。学会写让工程师和设计师真正理解的PRD。',
+    theory:`<div class="kp"><div class="kp-h">PRD的核心结构（电商场景）</div><div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>问题陈述（1页）：</strong>我们发现了什么问题？数据证明？影响多少用户？不解决的后果是什么？这是整个PRD的"为什么"，也是最重要的部分。</div></div><div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>方案概述：</strong>我们要做什么？一句话描述（如"增加购物车挽回弹窗，在用户即将离开时展示相关推荐和优惠"）。</div></div><div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>功能详述+交互说明：</strong>每个功能点的具体行为描述，包括边界情况和异常处理。这部分是为工程师写的。</div></div><div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>成功标准：</strong>上线后如何判断是否成功？具体指标和目标值。这部分是为PM自己写的，上线后要接受数据检验。</div></div></div><div class="pm-insight"><div class="pmi-label">PRD最容易被忽略的部分</div><div class="pmi-text">"不做什么"（Out of Scope）。明确说明哪些功能不在本次范围内，能防止需求蔓延（scope creep）——开发过程中不断加功能导致延期是项目失败的头号原因。每个PRD都应该有一个醒目的"本次不包含"列表。</div></div>`,
+    flashcards:[{q:'PRD中最容易被工程师忽视但最重要的部分是什么？',a:'边界情况（Edge Cases）和异常处理。例如：优惠券失效时怎么显示？库存为0时购物车如何处理？用户网络断了支付中途怎么办？这些场景占代码量的70%，但PM经常只描述Happy Path（正常流程），导致开发过程中不断返工。'}],
+    quiz:[{q:'以下哪种PRD写法更好？',opts:['A. 增加一个购物车按钮','B. 用户点击加入购物车后按钮变灰色，图标数字+1，2秒内显示toast提示已加入，3秒后消失（完整行为描述）','C. 参考竞品的购物车设计','D. 实现购物车功能，具体细节开发自己决定'],ans:'B',expl:'B描述了：触发条件（点击）、状态变化（按钮样式）、副作用（计数更新）、反馈时机（2秒内）、反馈内容（toast）、消失时机（3秒）。每个细节都明确，工程师无需猜测，减少来回确认的时间成本。'}],
+    practice:{context:'你需要为"搜索历史智能清理"功能写一份PRD。背景：用户调研发现35%的用户认为搜索历史"太多太杂"，导致搜索框体验差。平台搜索日活50万，平均每人有28条历史记录，其中有效记录（近30天内搜索）只占40%。',questions:['问题1：写出这个功能的完整问题陈述（包括：发现了什么问题、数据支撑、影响范围、不解决的后果）。','问题2：写出核心功能的功能详述，需要覆盖至少3个边界情况（如：用户手动删除的历史能否恢复？离线状态下如何处理？）。','问题3：如何设计这个功能的成功标准？写出具体的上线后评估指标、目标值、测试方案和决策节点（如果指标不好，什么时候回滚？）。']},
+  },
+  d23:{title:'跨团队协作技巧',tag:'Day 23 · 第四周',desc:'PM是"没有权力的责任人"。如何在没有汇报关系的情况下，推动工程师、设计师、运营协同工作。',
+    theory:`<div style="margin-bottom:12px"><div style="font-size:9px;font-weight:700;color:var(--t4);text-transform:uppercase;letter-spacing:.1em;margin-bottom:10px">PM的影响力来源</div><div style="display:grid;grid-template-columns:1fr 1fr;gap:7px"><div style="background:var(--gd);border:1px solid var(--gb);border-radius:10px;padding:12px"><div style="font-size:10px;font-weight:800;color:var(--green);margin-bottom:5px">✓ 有效影响力来源</div><div style="font-size:11px;color:var(--t2);line-height:1.7">数据和事实、清晰的目标、帮别人解决问题、建立信任关系、展示专业能力</div></div><div style="background:var(--rd);border:1px solid rgba(226,59,74,.2);border-radius:10px;padding:12px"><div style="font-size:10px;font-weight:800;color:var(--red);margin-bottom:5px">✗ 无效影响力来源</div><div style="font-size:11px;color:var(--t2);line-height:1.7">老板授权（用完即失）、职位权威（适得其反）、情感施压（损害关系）</div></div></div></div><div class="kp"><div class="kp-h">三种最常见的跨团队冲突和解法</div><div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>PM vs 工程师（工期分歧）：</strong>PM说"很简单"，工程师说"很复杂"。解法：要求工程师拆解任务清单，共同评估每个子任务的难度，找到可以砍掉的非关键功能。</div></div><div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>PM vs 运营（需求优先级）：</strong>运营要的功能PM认为不重要。解法：数据说话——运营需要提供"这个功能能带来多少GMV/用户"的量化预估，PM用RICE评估，一起决策。</div></div><div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>PM vs 设计（方案分歧）：</strong>设计师认为PM的方案不符合用户体验。解法：用A/B测试来验证，而不是争论谁对谁错——这是最有效的冲突消解工具。</div></div></div>`,
+    flashcards:[{q:'如何处理"工程师说需要3个月，PM希望1个月"的冲突？',a:'三步法：①让工程师拆解任务清单，每个子任务独立评估；②用MoSCoW分类哪些是MVP必须有，哪些可以砍；③提出"先做MVP版本上线，迭代完善"的分期方案。关键是把"时间分歧"变成"范围讨论"，这样双方都有退路。'}],
+    quiz:[{q:'PM在没有管理权限的情况下，最有效的推动方式是？',opts:['A. 用老板施压','B. 频繁催促和提醒','C. 让团队理解为什么要做这件事，以及它对各方的价值','D. 详细列出对方的工作清单'],ans:'C',expl:'"Why"比"What"更能驱动行动。当工程师/设计师理解这个功能对用户的真实价值，他们会主动解决问题；但如果只知道"PM要做这个"，执行时就只是"完成任务"而非"解决问题"，质量大打折扣。'}],
+    practice:{context:'你负责的"搜索优化"项目遇到了三个阻力：①前端工程师说搜索框重构需要6周，但老板要求3周上线；②设计师坚持认为你的交互方案"不够优雅"，反复修改耗时2周；③运营团队临时插入一个"大促搜索词热榜"需求，声称是"最高优先级"。',questions:['问题1：针对工期压缩问题，设计一个具体的谈判策略：如何在不伤害工程师关系的前提下，找到3周上线的可行路径？','问题2：如何处理设计师的方案分歧？设计一个让双方都能接受的解决方案，同时确保项目不再延期。','问题3：如何应对运营团队的临时需求插入？设计一套标准的"临时需求处理SOP"，既能让运营感觉被重视，又保护了你的项目进度。']},
+  },
+  d24:{title:'数据复盘方法',tag:'Day 24 · 第四周',desc:'上线不是终点，复盘才是。如何做一次真正有价值的数据复盘，而不是"总结经验教训"的形式主义。',
+    theory:`<div class="info-card" style="margin-bottom:12px"><div class="ic-l">有效复盘 vs 无效复盘</div><div style="margin-top:10px;display:flex;flex-direction:column;gap:6px"><div style="background:var(--rd);border-radius:8px;padding:10px;font-size:12px;color:var(--t2)"><strong style="color:var(--red)">✗ 无效复盘：</strong>罗列数据 → 说"达到/未达到目标" → 写几条"经验教训" → 结束。下次做同样的错误。</div><div style="background:var(--gd);border-radius:8px;padding:10px;font-size:12px;color:var(--t2)"><strong style="color:var(--green)">✓ 有效复盘：</strong>数据 → 根因分析（为什么达到/未达到）→ 系统性学习（下次怎么设计不同）→ 形成可复用的决策框架。</div></div></div><div class="kp"><div class="kp-h">复盘的五步法</div><div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>Step 1 — 目标vs结果：</strong>当初预期X，实际结果Y，差异D。</div></div><div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>Step 2 — 根因分析：</strong>用5-Why找到产生差异的深层原因，不停留在"执行不好"这种表面答案。</div></div><div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>Step 3 — 假设验证：</strong>当初做的哪些假设被证明是错的？这些错误假设来自什么？</div></div><div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>Step 4 — 系统学习：</strong>这次学到的东西如何改变我下次做类似决策时的方式？</div></div><div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>Step 5 — 行动项：</strong>基于复盘的具体改变，有负责人和截止日期，而不是"以后注意"。</div></div></div>`,
+    flashcards:[{q:'为什么"达到目标"的复盘比"未达到目标"的复盘更难做？',a:'"成功"往往是多个因素的组合，很难分清是因为决策好还是运气好。如果不做成功的复盘，下次可能重复的是运气而不是可复制的方法。最危险的状态是：某次大促成功了但不知道为什么→下次依样画葫芦→发现不灵了→不知道原因。'}],
+    quiz:[{q:'复盘结束后，最重要的产出是什么？',opts:['A. 一份详细的PPT报告','B. 对团队的表扬或批评','C. 有明确负责人和截止日期的行动项，以及可复用的决策框架','D. 给老板的汇报材料'],ans:'C',expl:'没有行动项的复盘=形式主义。复盘的价值在于改变下一次的行为，而不是记录这一次的历史。行动项要有：具体改变是什么、谁负责、什么时候完成、如何验证改变了。'}],
+    practice:{context:'你负责的双11大促刚刚结束。结果：GMV达到目标的115%（超额完成），但用户NPS大促后下降了8分，退货率为18%（历史最高），大促期间服务器出现2次宕机（总计45分钟不可用）。',questions:['问题1：这次大促是成功还是失败？请给出你的判断依据，以及如何向不同利益方（老板/运营/技术）分别呈现这个结果。','问题2：用5-Why法分析"退货率18%（历史最高）"的根本原因，找到可以系统性改进的产品/运营环节。','问题3：设计这次大促的完整复盘文档结构（不用写内容，给出一级标题和每节的核心问题），以及复盘后的3个最重要行动项（每个行动项需要：具体内容、负责人、完成时间、验证方式）。']},
+  },
+  d25:{title:'增长黑客思维',tag:'Day 25 · 第四周',desc:'增长不只是投广告。理解增长飞轮、病毒系数和低成本获客——电商PM的增长思维工具箱。',
+    theory:`<div class="info-card" style="margin-bottom:12px"><div class="ic-l">增长黑客的核心公式</div><div style="margin-top:10px"><div style="font-size:13px;color:var(--t2);line-height:1.8;text-align:center"><strong style="color:var(--t1);font-size:15px">新用户 = 现有用户 × 病毒系数K</strong><br><span style="font-size:11px">K > 1 = 病毒式增长 | K = 1 = 平衡 | K < 1 = 需要持续购买流量</span></div></div></div><div class="kp"><div class="kp-h">电商增长的三大杠杆</div><div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>病毒增长：</strong>拼多多砍一刀（K>1的经典案例）——每个用户带来0.3-0.5个新用户，边际获客成本接近于零。设计关键：分享有明确价值，被邀请者有强激励。</div></div><div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>内容增长：</strong>小红书用UGC内容驱动搜索流量——用户生产内容→SEO曝光→新用户发现→成为内容生产者。飞轮建立后边际成本极低。</div></div><div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>产品增长（PLG）：</strong>产品本身是最好的销售工具。用户用产品→感受到价值→自然推荐→带来新用户。关键是"aha moment"（顿悟时刻）尽可能早出现。</div></div></div><div class="pm-insight"><div class="pmi-label">增长黑客的核心是找杠杆点</div><div class="pmi-text">不是所有环节都值得优化。增长黑客的思维是找到增长漏斗中"改善10%带来最大收益"的那个点，集中资源猛攻这一个点，而不是平均分配资源全面优化。这和你在GMV模型中学到的"杠杆ROI"思维是一致的。</div></div>`,
+    flashcards:[{q:'"aha moment"（顿悟时刻）在电商产品中是什么？',a:'aha moment = 用户第一次真正感受到产品核心价值的那个瞬间。电商中通常是：第一次购买成功且按时收到好货→"哦这个平台真的靠谱"。优化aha moment的产品策略：缩短从注册到第一次成功购买的路径，在这个路径上减少每一个摩擦点。'}],
+    quiz:[{q:'某电商平台设计了"邀请好友得优惠券"活动，发现邀请率很高但被邀请者的转化率极低，原因最可能是？',opts:['A. 优惠券面额太小','B. 被邀请者对电商不感兴趣','C. 邀请动机是获得优惠券而非真实推荐，被邀请者感受不到平台价值','D. 邀请流程太复杂'],ans:'C',expl:'当邀请行为是利益驱动而非价值驱动时，被邀请者接收到的是"我朋友为了薅羊毛把我也拉进来了"而不是"我朋友真的觉得这个平台好"。社交推荐的核心价值是信任传递，而不是利益传递。解决方案：先让用户感受到产品价值，再激励分享。'}],
+    practice:{context:'某垂直宠物电商，月GMV 2000万，月新用户2万。当前主要获客方式：信息流广告（占85%），CAC为180元，LTV为520元，LTV/CAC=2.9（健康，但增长乏力）。老板要求半年内将新用户数提升至每月5万，且不增加广告预算。',questions:['问题1：在不增加广告预算的前提下，将新用户从2万提升到5万，有哪些可行的增长策略？请列出至少3种，并分析每种策略的适用条件和预期效果。','问题2：宠物品类天然适合UGC内容（用户分享宠物照片/视频），如何设计一个"内容增长飞轮"，让UGC内容成为持续获客的引擎？','问题3：为这个增长计划设计一个6个月的执行路线图，包括每个月的核心增长实验、验证指标和决策节点（如果数据不达标，如何调整策略）。']},
+  },
+  d26:{title:'商业模式画布',tag:'Day 26 · 第四周',desc:'用商业模式画布分析电商平台：从价值主张到收入来源，理解产品决策背后的商业逻辑。',
+    theory:`<div class="info-card" style="margin-bottom:12px"><div class="ic-l">电商平台商业模式画布九宫格</div><div style="display:grid;grid-template-columns:repeat(3,1fr);gap:5px;margin-top:10px"><div style="background:var(--bld);border:1px solid var(--blb);border-radius:8px;padding:9px"><div style="font-size:9px;font-weight:800;color:#8085f5;margin-bottom:4px">核心伙伴</div><div style="font-size:11px;color:var(--t2)">商家生态、物流服务商、支付伙伴</div></div><div style="background:var(--s3);border:1px solid var(--bd);border-radius:8px;padding:9px"><div style="font-size:9px;font-weight:800;color:var(--t3);margin-bottom:4px">核心活动</div><div style="font-size:11px;color:var(--t2)">平台运营、算法优化、治理规则</div></div><div style="background:var(--gd);border:1px solid var(--gb);border-radius:8px;padding:9px"><div style="font-size:9px;font-weight:800;color:var(--green);margin-bottom:4px">价值主张</div><div style="font-size:11px;color:var(--t2)">买家：海量选择+信任；商家：流量+工具</div></div><div style="background:var(--ad);border:1px solid rgba(236,126,0,.25);border-radius:8px;padding:9px"><div style="font-size:9px;font-weight:800;color:var(--amber);margin-bottom:4px">客户关系</div><div style="font-size:11px;color:var(--t2)">个性化推荐、会员体系、客服</div></div><div style="background:var(--s3);border:1px solid var(--bd);border-radius:8px;padding:9px"><div style="font-size:9px;font-weight:800;color:var(--t3);margin-bottom:4px">客户细分</div><div style="font-size:11px;color:var(--t2)">买家（终端消费者）+ 商家（供给侧）</div></div><div style="background:var(--rd);border:1px solid rgba(226,59,74,.2);border-radius:8px;padding:9px"><div style="font-size:9px;font-weight:800;color:var(--red);margin-bottom:4px">成本结构</div><div style="font-size:11px;color:var(--t2)">服务器、物流补贴、获客、运营成本</div></div><div style="background:var(--gd);border:1px solid var(--gb);border-radius:8px;padding:9px;grid-column:span 3"><div style="font-size:9px;font-weight:800;color:var(--green);margin-bottom:4px">收入来源</div><div style="font-size:11px;color:var(--t2)">广告费（直通车）40-60% + 佣金20-30% + 增值服务10-20% + 金融服务5-10%</div></div></div></div><div class="pm-insight"><div class="pmi-label">PM理解商业模式的意义</div><div class="pmi-text">每一个产品功能都会影响商业模式的某个模块。例如：推出免广告版本（影响收入来源）；增加商家工具（影响价值主张和客户关系）；上线即时配送（影响成本结构）。PM理解商业模式，才能预判产品决策的商业后果，而不只是看功能好不好用。</div></div>`,
+    flashcards:[{q:'为什么广告费是电商平台的主要收入而不是商品销售佣金？',a:'广告的边际成本接近于零（展示一个广告vs展示一百个广告成本差别不大），而佣金受制于GMV规模有天花板。广告收入随商家竞争激烈程度自动调节（竞争越激烈，出价越高），这种自适应定价让广告收入可以持续增长，而佣金率则有被迫降低的压力（商家抱怨成本高）。'}],
+    quiz:[{q:'电商平台推出"金融服务"（消费贷款/分期付款）的商业逻辑是什么？',opts:['A. 增加服务多样性','B. 用户需要贷款功能','C. 利用平台数据优势降低风险定价，提高客单价，并获得远高于广告的利润率','D. 跟上竞品功能'],ans:'C',expl:'平台有大量用户购买行为数据，能比银行更准确地评估还款能力，因此可以以更低风险提供贷款。消费贷款能将客单价提升30-50%，而利息收益远高于广告（金融服务净利润率50%+ vs 广告20-30%）。这就是为什么所有大型电商平台都在做金融服务。'}],
+    practice:{context:'你是某垂直家电电商（类似苏宁）的战略产品PM，正在分析：当前收入90%来自商品销售佣金，广告收入仅占5%。竞争对手（京东/天猫）广告收入占比达40-50%。老板要求你提出一个"收入多元化"的产品战略。',questions:['问题1：用商业模式画布分析当前平台的商业模式，指出主要的战略弱点。','问题2：设计一个"广告产品从5%提升到25%"的产品路线图，包括需要建设的产品基础设施（数据、工具、系统）和关键里程碑。','问题3：除了广告，还有哪2-3个收入来源适合家电电商平台？每种收入来源的产品实现路径是什么？']},
+  },
+  d27:{title:'电商PM职业路径',tag:'Day 27 · 第四周',desc:'电商PM如何成长？从初级到高级，从执行者到决策者，这条路上最关键的转折点在哪里？',
+    theory:`<div style="margin-bottom:12px"><div style="font-size:9px;font-weight:700;color:var(--t4);text-transform:uppercase;letter-spacing:.1em;margin-bottom:10px">PM成长阶梯</div><div style="display:flex;flex-direction:column;gap:6px"><div style="background:var(--s3);border:1px solid var(--bd);border-radius:10px;padding:12px;display:grid;grid-template-columns:80px 1fr;gap:10px"><div style="font-size:11px;font-weight:700;color:var(--t3)">初级PM<br>（0-2年）</div><div style="font-size:11px;color:var(--t2)">执行功能迭代，写PRD，协调开发设计，数据分析基础。核心能力：<strong style="color:var(--t1)">把想法变成可执行的产品</strong></div></div><div style="background:var(--bld);border:1px solid var(--blb);border-radius:10px;padding:12px;display:grid;grid-template-columns:80px 1fr;gap:10px"><div style="font-size:11px;font-weight:700;color:#8085f5">中级PM<br>（2-5年）</div><div style="font-size:11px;color:var(--t2)">负责完整产品线，有优先级判断，能独立推动跨团队项目。核心能力：<strong style="color:var(--t1)">在约束下做正确的取舍</strong></div></div><div style="background:var(--gd);border:1px solid var(--gb);border-radius:10px;padding:12px;display:grid;grid-template-columns:80px 1fr;gap:10px"><div style="font-size:11px;font-weight:700;color:var(--green)">高级PM<br>（5年+）</div><div style="font-size:11px;color:var(--t2)">负责产品战略，培养团队，影响公司方向。核心能力：<strong style="color:var(--t1)">定义正确的问题</strong></div></div></div></div><div class="pm-insight"><div class="pmi-label">电商PM最有价值的差异化能力</div><div class="pmi-text">不是会某个工具或框架（这些可以快速学习），而是：①<strong>数据敏感度</strong>——看到一个指标就能快速推断背后发生了什么；②<strong>用户同理心</strong>——在没有调研数据时也能准确预测用户行为；③<strong>商业判断力</strong>——每个产品决策都能说清楚商业价值，而不只是用户价值。</div></div>`,
+    flashcards:[{q:'从初级到中级PM，最关键的能力跃升是什么？',a:'从"执行者"到"问题定义者"。初级PM：给我一个方案，我来实现它。中级PM：我来判断哪个问题值得解决，并设计解决方案。这个跃升的核心是：敢于质疑"为什么要做这件事"，而不是直接问"怎么做"。'}],
+    quiz:[{q:'以下哪个行为表明一个PM已经从"初级"迈向了"中级"？',opts:['A. 能写出详细的PRD','B. 主动提出"这个需求我们不应该做，因为..."并能说服老板','C. 熟悉竞品的所有功能','D. 能快速响应老板的要求'],ans:'B',expl:'"不做"比"做"更难，因为需要对优先级有清晰判断，并有勇气和能力说服利益相关方。这种能力代表PM已经能独立判断价值，而不是依赖别人的指令。会说"不"的PM，才是真正有产品判断力的PM。'}],
+    practice:{context:'你在一家中型电商公司做了2年初级PM，现在想晋升为中级PM。你的年终晋升汇报需要在15分钟内说服VP：你已经具备中级PM的能力，并且未来一年有清晰的成长计划。',questions:['问题1：从这30天课程的学习中，找出3-5个你认为最重要的产品认知升级，说明它们如何改变了你对"做好产品"的理解。','问题2：设计你未来6个月的个人成长计划：目标能力、学习路径、实践项目、验证方式。','问题3：假设你面试一家新电商公司，面试官问"你的产品判断力在哪些具体决策中体现出来了"，如何用STAR法（情境-任务-行动-结果）讲述一个最有说服力的故事？']},
+  },
+  d28:{title:'模拟面试实战',tag:'Day 28 · 第四周',desc:'大厂电商PM面试全攻略：从产品分析题到Case Study，掌握面试官真正在考察什么。',
+    theory:`<div class="kp"><div class="kp-h">电商PM面试常见题型</div><div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>产品分析题：</strong>"某功能数据下降了，如何分析？"。考察：数据诊断思维、漏斗分析、根因推导。框架：外部因素→内部因素→分层拆解→优先级验证。</div></div><div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>产品设计题：</strong>"设计一个XXX功能"。考察：用户理解、需求拆解、方案取舍、数据意识。框架：目标用户→核心场景→解决方案→成功指标。</div></div><div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>商业分析题：</strong>"如果你是XX平台的PM，如何提升GMV？"。考察：商业思维、全局视野、优先级判断。框架：现状诊断→杠杆分析→方案设计→资源估算。</div></div><div class="kp-r"><div class="kpdot"></div><div class="kptx"><strong>行为题：</strong>"说一次你推动了一个困难项目的经历"。考察：沟通能力、影响力、抗压性。框架：STAR法（情境-任务-行动-结果）。</div></div></div><div class="pm-insight"><div class="pmi-label">面试中最常被忽略的加分点</div><div class="pmi-text">在产品设计题中主动提出"我有几个假设，让我先验证一下..."——这比直接给出方案更能展现PM思维。好的PM不是立刻给答案，而是先确认问题边界，再提出假设，再设计验证。这个过程本身就是在展示你的产品思维，而不只是知识积累。</div></div>`,
+    flashcards:[{q:'面试中遇到"如何提升XX平台的GMV"这种开放题，第一步应该做什么？',a:'第一步：确认前提假设。"我想先了解一下当前的情况——是特定品类还是整体GMV？主要是新用户获取问题还是老用户留存问题？有没有数据可以先看一下？"这样做的目的：①展示结构化思维；②避免方向跑偏；③表现出数据驱动的习惯。面试官看到你先问问题，会认为这个候选人懂得如何真正分析问题。'}],
+    quiz:[{q:'面试时面试官说"你的方案听起来不错，但如果资源有限只能做一件事呢？"，最好的应对方式是？',opts:['A. 坚持说需要做所有功能','B. 随机选一个','C. 说明选择标准（ROI最高/风险最低/最能验证核心假设），然后选择并解释','D. 问面试官应该选哪个'],ans:'C',expl:'面试官在考察优先级判断能力，而不是答案本身。C展示了：你有判断框架，能清晰解释为什么选这个而不是那个。说明标准比直接给答案更重要——这才是PM日常工作中真正面对的情况：资源永远不够，必须有原则地做取舍。'}],
+    practice:{context:'模拟面试：请用25分钟完成以下三道电商PM面试题（每题8分钟）。',questions:['面试题1（产品分析）：某电商App最近7天搜索页面的用户停留时长增加了40%，但搜索后的购买转化率反而下降了15%。请分析可能的原因，并提出验证和改进方案。','面试题2（产品设计）：请为一个月活50万的垂直宠物电商App，设计一个"宠物健康档案"功能，要求能提升用户粘性和复购率。','面试题3（商业分析）：假设你是微信支付团队的PM，微信刚刚想进入电商领域（对标淘宝），你会如何利用微信的现有优势，设计进入电商市场的策略？']},
+  },
+  d29:{title:'30天知识大复习',tag:'Day 29 · 冲刺',desc:'用思维导图串联30天所有知识点，构建完整的电商PM知识体系，为最终测评做准备。',
+    theory:`<div style="margin-bottom:14px"><div style="font-size:9px;font-weight:700;color:var(--t4);text-transform:uppercase;letter-spacing:.1em;margin-bottom:12px">30天知识全景图</div><div style="display:grid;grid-template-columns:1fr 1fr;gap:8px"><div style="background:var(--bld);border:1px solid var(--blb);border-radius:11px;padding:14px"><div style="font-size:10px;font-weight:800;color:#8085f5;margin-bottom:8px">🌀 第一周 — 基础认知</div><div style="font-size:11px;color:var(--t2);line-height:1.9">双边市场飞轮 · GMV四杠杆<br>用户购物旅程六阶段 · 搜索vs推荐<br>商家产品逻辑 · 平台治理规则</div></div><div style="background:var(--ad);border:1px solid rgba(236,126,0,.25);border-radius:11px;padding:14px"><div style="font-size:10px;font-weight:800;color:var(--amber);margin-bottom:8px">🎯 第二周 — 活动营销</div><div style="font-size:11px;color:var(--t2);line-height:1.9">大促时间线 · 促销工具ROI<br>会员分级体系 · 直播四大心理<br>内容私域 · 跨境本地化</div></div><div style="background:var(--gd);border:1px solid var(--gb);border-radius:11px;padding:14px"><div style="font-size:10px;font-weight:800;color:var(--green);margin-bottom:8px">🔭 第三周 — 产品视野</div><div style="font-size:11px;color:var(--t2);line-height:1.9">RICE优先级 · Roadmap设计<br>北极星指标 · A/B测试陷阱<br>竞品战略分析 · 用户调研方法</div></div><div style="background:var(--rd);border:1px solid rgba(226,59,74,.2);border-radius:11px;padding:14px"><div style="font-size:10px;font-weight:800;color:var(--red);margin-bottom:8px">🚀 第四周 — 综合实战</div><div style="font-size:11px;color:var(--t2);line-height:1.9">PRD写作 · 跨团队协作<br>数据复盘五步法 · 增长飞轮<br>商业模式画布 · 面试技巧</div></div></div></div><div class="pm-insight"><div class="pmi-label">30天学习最重要的一个洞察</div><div class="pmi-text">电商PM的核心竞争力不是"会用更多工具"，而是能在任何电商场景下，快速构建出<strong>完整的问题分析框架</strong>——从数据异常到根因推导，从用户洞察到产品方案，从方案设计到商业论证，每一步都有清晰的思维路径。这才是30天训练的真正成果。</div></div>`,
+    flashcards:[{q:'如果只能记住30天课程中的3个核心框架，你会选哪3个？',a:'①GMV=流量×转化×客单×复购（诊断任何电商数据问题的起点）；②飞轮模型（理解平台商业本质和任何产品决策的长期影响）；③用户旅程六阶段（产品改进优先级的直觉框架）。这三个框架能覆盖80%的电商PM日常工作场景。'},{q:'电商PM区别于其他类型PM最独特的思维是什么？',a:'"双边市场意识"——任何产品决策都要同时考虑买家体验和商家经营的影响。改变一个功能可能同时影响：买家的购物体验、商家的运营效率、平台的广告收入、整体飞轮的健康度。这种多利益方思维是电商PM区别于其他PM最核心的能力。'}],
+    quiz:[{q:'综合复习题：某平台同时出现：搜索CTR↓20%、新商家30天留存↓15%、大促后GMV崖明显。这三个问题的共同根因最可能是？',opts:['A. 技术问题导致系统响应慢','B. 平台供给质量下降——商家质量变差→搜索结果质量差→CTR下降；商家留存差→供给减少→大促后恢复慢','C. 用户需求发生了变化','D. 竞品抢走了核心用户'],ans:'B',expl:'三个问题背后都指向供给侧问题：搜索CTR低说明搜索结果匹配度差（商品质量/丰富度问题）；新商家留存低说明新供给在快速流失；大促GMV崖说明平台没有足够稳定的高质量供给来维持大促后的消费。根因：商家侧产品力不足，导致供给生态恶化。'},{q:'回顾30天学习，以下哪个认知是正确的？',opts:['A. GMV增长是评估电商PM价值的唯一标准','B. 电商PM的核心工作是设计功能','C. 任何产品决策都要在用户体验、商家经营、平台商业三个维度找到最优平衡','D. 数据越详细分析越准确'],ans:'C',expl:'这是30天课程最核心的认知：电商是双边市场，任何单方面优化都可能损害另一方，最终损害整体飞轮。好的电商PM找到三方利益的最大公约数，而不是牺牲某一方来成就另一方。'}],
+    practice:{context:'这是第29天的综合练习，整合全30天的知识体系。',questions:['综合题1：用你学到的所有框架，对"今日头条入局电商（字节电商）"做一个完整的战略分析：他们的优势是什么？面临的最大挑战是什么？如果你是他们的CPO，最优先建设的核心能力是什么？','综合题2：某电商平台在过去一年内同时发生：GMV增长20%（符合预期），但DAU和NPS都在持续下降。从你30天学到的所有知识分析：这意味着什么？这种组合是可持续的吗？接下来会发生什么？','综合题3：回顾这30天学习，写下你自己的"电商PM第一性原理"：3-5条你认为最底层、最不会错的产品思考原则，并举例说明它们如何指导具体的产品决策。']},
+  },
+  d30:{title:'结业综合测评',tag:'Day 30 · 结业',desc:'30天的终点，也是职业成长的新起点。完成最终综合测评，拿到你的电商PM认证。',
+    theory:`<div style="text-align:center;padding:20px 0 24px"><div style="font-size:40px;margin-bottom:12px">🎓</div><div style="font-size:24px;font-weight:700;color:var(--t1);letter-spacing:-.4px;margin-bottom:8px">恭喜完成30天训练！</div><div style="font-size:14px;color:var(--t2);max-width:400px;margin:0 auto;line-height:1.7">你已经系统掌握了电商产品经理所需的核心知识体系。最后一步：完成综合测评，获得你的电商PM认证。</div></div><div style="margin-bottom:16px"><div style="font-size:9px;font-weight:700;color:var(--t4);text-transform:uppercase;letter-spacing:.1em;margin-bottom:10px">你在这30天学到的核心能力</div><div style="display:flex;flex-direction:column;gap:6px"><div style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:var(--gd);border:1px solid var(--gb);border-radius:10px"><span style="font-size:16px">🌀</span><div><div style="font-size:12px;font-weight:700;color:var(--green)">双边市场思维</div><div style="font-size:11px;color:var(--t2)">任何决策都考虑买家、商家、平台三方平衡</div></div></div><div style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:var(--bld);border:1px solid var(--blb);border-radius:10px"><span style="font-size:16px">📊</span><div><div style="font-size:12px;font-weight:700;color:#8085f5">数据诊断能力</div><div style="font-size:11px;color:var(--t2)">看到指标异常能快速推导根因，精准定位问题</div></div></div><div style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:var(--ad);border:1px solid rgba(236,126,0,.25);border-radius:10px"><span style="font-size:16px">⚖️</span><div><div style="font-size:12px;font-weight:700;color:var(--amber)">优先级判断力</div><div style="font-size:11px;color:var(--t2)">在资源有限时，知道什么最重要，并能说服所有人</div></div></div><div style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:var(--s3);border:1px solid var(--bd);border-radius:10px"><span style="font-size:16px">🚀</span><div><div style="font-size:12px;font-weight:700;color:var(--t1)">全链路视野</div><div style="font-size:11px;color:var(--t2)">从用户旅程到商业模式，能看到产品的完整影响链</div></div></div></div></div>`,
+    flashcards:[{q:'完成30天训练后，如何把这些知识变成实际的工作能力？',a:'三个行动：①每次看到数据异常，先不问别人，自己先用框架分析一遍；②每个产品决策，写下你的假设和预期结果，上线后验证；③每个月找一个你最近遇到的产品问题，用多个框架分析一遍，形成自己的判断标准。知识→能力的转化靠的是刻意练习，而不是记忆。'},{q:'电商产品经理在5年后的发展方向有哪些？',a:'三条主要路径：①技术产品路线：深入某一技术方向（搜索/推荐/支付），成为行业专家，走向技术PM或首席产品官；②业务通用路线：跨品类扩展经验，成为全局产品负责人或CPO；③创业路线：用电商经验创业，做垂直品类或工具产品。三条路都很有价值，关键是想清楚自己追求的是"深度"还是"广度"还是"自主性"。'}],
+    quiz:[{q:'作为电商PM，面对"老板今天提了一个新想法，要你马上评估"的情况，最专业的应对是？',opts:['A. 立即开始做','B. 说"这个不重要"然后忽略','C. 用已学的框架快速评估：用户价值→商业价值→实现成本→优先级→给出带数据支撑的建议','D. 等老板再提一次再考虑'],ans:'C',expl:'C展示了PM的核心价值：不是执行者（A），不是拒绝者（B），而是能快速评估并给出数据支撑建议的决策伙伴。这正是高级PM与初级PM的最大区别。'},
+    {q:'30天训练结束，以下哪个说法是正确的？',opts:['A. 学完这30天就能成为顶级PM了','B. 这30天建立的框架需要在实际工作中不断运用和修正才能内化','C. 电商PM最重要的是记住所有框架名称','D. 理论知识比实际经验更重要'],ans:'B',expl:'框架是思考的工具，不是答案。这30天建立的是"思考问题的方式"，但让它变成真正的能力，需要在实际工作中不断运用、验证、修正。继续保持这种结构化思考的习惯，每次遇到问题都问自己"我应该用哪个框架来分析这个"，能力就会持续增长。'}],
+    practice:{context:'这是你的结业综合测评。请在以下三道题中，展示你30天来的全部学习成果。这将是你电商PM学习历程中最重要的一次答题。',questions:['结业题1（综合诊断）：某电商平台本季度出现了这些数据：月GMV同比+8%（行业增速15%）、新用户同比-12%、老用户复购率从15%↑到22%、商家数量+18%但商家月均GMV-20%、搜索CTR↓25%。请做一个完整的平台健康度诊断：这些数据说明什么，最核心的问题在哪里，优先级最高的改进方向是什么，你会如何向CEO汇报这个情况？','结业题2（产品设计）：请为一个刚刚成立的垂直运动电商平台（0到1阶段，目标用户：一二线城市25-40岁运动爱好者，当前无任何功能，只有一个基本商品上架和购买流程），设计未来12个月的产品路线图。需要包含：北极星指标选择、每个季度的核心功能和目标、预期的用户增长路径、以及你最担心的3个风险及应对方案。','结业题3（个人总结）：写下你30天最重要的三个产品认知升级（与开始训练前相比，什么改变了？），以及你计划如何在接下来3个月的实际工作中运用这些知识（具体的行动计划，不是泛泛而谈）。']},
+  },
+};
+
+  const dayKeys = Object.keys(DAYS);
+  log(`📋 共 ${dayKeys.length} 天课程数据待上传`, 'info');
+
+  for (const dayId of dayKeys) {
+    if (_stop) break;
+
+    const d = DAYS[dayId];
+    log(`⏳ 上传 ${dayId}：${d.title}...`, 'info');
+
+    try {
+      // 清理 theory：如果是 HTML 字符串直接存，如果是对象取 content
+      const theoryContent = typeof d.theory === 'string' ? d.theory : (d.theory?.content || '');
+
+      await setDoc(doc(db, 'courses', dayId), {
+        id: dayId,
+        title: d.title || '',
+        tag: d.tag || '',
+        desc: d.desc || '',
+        theory: theoryContent,
+        flashcards: d.flashcards || [],
+        quiz: d.quiz || [],
+        practice: d.practice || {},
+        updatedAt: new Date().toISOString()
+      });
+
+      _done++;
+      updateStats();
+      log(`✅ ${dayId} 上传成功：${d.title}`, 'ok');
+
+      // 每次上传后稍微等一下，避免触发 Firestore 频率限制
+      await new Promise(r => setTimeout(r, 300));
+
+    } catch(e) {
+      _fail++;
+      updateStats();
+      log(`❌ ${dayId} 上传失败：${e.message}`, 'err');
+    }
+  }
+
+  log('────────────────────────────', 'info');
+  if (_stop) {
+    log(`⏸ 上传已停止。成功 ${_done} 天，失败 ${_fail} 天`, 'warn');
+  } else if (_fail === 0) {
+    log(`🎉 全部上传完成！共 ${_done} 天课程数据已存入 Firestore`, 'ok');
+    log('✅ 现在可以设置 Firestore 安全规则，限制未登录用户访问', 'ok');
+  } else {
+    log(`⚠️ 上传完成，成功 ${_done} 天，失败 ${_fail} 天，请检查失败项`, 'warn');
+  }
+
+  document.getElementById('btn-start').disabled = false;
+  document.getElementById('btn-stop').disabled = true;
+};
+
+// ── 检查登录状态 ──
+onAuthStateChanged(auth, (user) => {
+  if (user) {
+    log(`✅ 检测到登录用户：${user.email}`, 'ok');
+    log('点击「开始上传」按钮开始上传课程数据', 'info');
+  } else {
+    log('⚠️ 未检测到登录用户', 'warn');
+    log('请先在主网站登录后，再打开此工具页面', 'warn');
+    log('或者：打开 F12 控制台，手动执行登录命令', 'info');
+  }
+});
+
+window.db = db;
+window.auth = auth;
+</script>
+</body>
+</html>
