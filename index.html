@@ -3995,9 +3995,10 @@ async function doRegister() {
 
   } catch(e) {
     let msg = fbErr(e.code);
-    // 特别处理 operation-not-allowed
     if (e.code === 'auth/operation-not-allowed') {
-      msg = '邮箱注册功能未开启。请前往 Firebase 控制台 → Authentication → Sign-in method → 开启「电子邮件/密码」';
+      msg = '邮箱注册功能未开启，请联系管理员或使用 Google 登录';
+    } else if (e.code === 'auth/too-many-requests') {
+      msg = '注册请求过于频繁，请等待几分钟后再试';
     }
     showErr(msg);
     btn.disabled = false;
@@ -4030,21 +4031,49 @@ async function checkEmailVerified() {
   if (btn) { btn.disabled = true; btn.textContent = '验证中...'; }
 
   try {
+    // 刷新获取最新 emailVerified 状态
     await _regUser.reload();
-    if (_regUser.emailVerified) {
-      // 验证成功，正常进入应用
+    const freshUser = window._fb.auth.currentUser;
+
+    if (freshUser && freshUser.emailVerified) {
       showOk('✓ 邮箱验证成功！正在进入...');
-      setTimeout(() => {
-        window._currentUser = _regUser;
-        showApp(_regUser);
-      }, 800);
+      window._currentUser = freshUser;
+      _regUser = null;
+      // 写入 Firestore 并进入应用
+      setTimeout(async () => {
+        try {
+          const db = window._fb.db;
+          const ref = window._fb.doc(db, 'users', freshUser.uid);
+          const snap = await window._fb.getDoc(ref);
+          if (!snap.exists()) {
+            await window._fb.setDoc(ref, {
+              uid: freshUser.uid,
+              email: freshUser.email,
+              displayName: freshUser.displayName || freshUser.email.split('@')[0],
+              photoURL: null,
+              createdAt: window._fb.serverTimestamp(),
+              progress: { completedDays: [], scores: {}, streak: 0, lastStudyDate: null, totalXP: 0 }
+            });
+            window._userProgress = { completedDays: [], scores: {}, streak: 0, totalXP: 0 };
+          } else {
+            window._userProgress = snap.data().progress || { completedDays: [], scores: {}, streak: 0, totalXP: 0 };
+          }
+          window._userDoc = window._fb.doc(db, 'users', freshUser.uid);
+        } catch(dbErr) { console.warn('DB init error:', dbErr); }
+        showApp(freshUser);
+      }, 600);
+
     } else {
       if (btn) { btn.disabled = false; btn.textContent = '✓ 我已验证，进入学习'; }
-      showErr('邮箱尚未验证，请先点击邮件中的链接');
+      showErr('邮箱尚未验证，请先点击邮件中的链接，再回来点击此按钮');
     }
   } catch(e) {
     if (btn) { btn.disabled = false; btn.textContent = '✓ 我已验证，进入学习'; }
-    showErr('验证检查失败，请稍后重试');
+    if (e.code === 'auth/too-many-requests') {
+      showErr('操作过于频繁，请等待几分钟后重试');
+    } else {
+      showErr('验证检查失败，请稍后重试');
+    }
   }
 }
 
@@ -4067,7 +4096,11 @@ async function resendVerification() {
       }
     }, 1000);
   } catch(e) {
-    showErr('发送失败：' + fbErr(e.code));
+    if (e.code === 'auth/too-many-requests') {
+      showErr('发送次数过多，请等待几分钟后再试（Firebase有频率限制）');
+    } else {
+      showErr('发送失败：' + fbErr(e.code));
+    }
     if (btn) { btn.disabled = false; btn.textContent = '重新发送验证邮件'; }
   }
 }
